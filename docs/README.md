@@ -56,7 +56,7 @@ ARCHITECTURE.md  ──►  PLUGIN_GUIDE.md      （想扩展功能）
 | `plugin-command-count` | README / `CLI.md` 声明的命令数必须与插件实际注册数一致 |
 | `ci-entrypoints` | 流水线、钩子、`ci.bat` 里引用的工具路径必须存在（改名不会让 CI 静默失效） |
 
-完整清单（17 条，含"哪条在缺 `vendor/` 时记 SKIP"）见 [DEVELOPMENT.md](DEVELOPMENT.md) §4。
+完整清单（18 条，含"哪条在缺 `vendor/` 时记 SKIP"）见 [DEVELOPMENT.md](DEVELOPMENT.md) §4。
 
 ```bat
 :: 改完文档跑一遍就知道有没有写散

@@ -133,8 +133,9 @@ class TestGateRegistry(unittest.TestCase):
         for must in ("bat-ascii-crlf", "plugin-manifest", "release-payload",
                      "arg-bounds-align", "rpc-methods-align", "exit-codes-align",
                      "cli-commands-align", "versions-align", "third-party-notices",
-                     "doc-links", "docs-index", "readme-tree",
-                     "plugin-command-count", "native-plugin-set", "js-plugin-count"):
+                     "doc-links", "docs-index", "readme-tree", "no-credentials",
+                     "plugin-command-count", "native-plugin-set", "js-plugin-count",
+                     "portable-modules", "ci-entrypoints"):
             self.assertIn(must, names)
 
     def test_critical_gates_have_a_selfcheck_case(self):

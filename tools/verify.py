@@ -441,6 +441,49 @@ def g_portable_modules(verbose):
     return "%d 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）" % len(targets)
 
 
+# 凭据类：键名 + 分隔符 + 32 位以上 hex。刻意要求"键名在前"，
+# 这样普通的长哈希（sha256 是 64 位 hex，仓库里到处都有）**不会**被误报。
+CREDENTIAL_PATTERNS = [
+    re.compile(r"(?:access_token|api_?key|auth_?token|password|passwd|secret|token)"
+               r"\s*[=:]\s*[\"']?([0-9a-fA-F]{32,})", re.I),
+    re.compile(r"gitee\.com[^\s\"']*[?&]access_token=[0-9a-fA-F]{16,}", re.I),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+]
+
+SCAN_EXTS = {".py", ".md", ".txt", ".json", ".yml", ".yaml", ".bat", ".cmd", ".ini",
+             ".mjs", ".js", ".c", ".cpp", ".h", ".hpp", ".ps1", ".sh", ".env", ""}
+
+
+@gate("no-credentials", "被跟踪的文件里没有硬编码的令牌/私钥（公开仓库的底线）")
+def g_no_credentials(verbose):
+    """一条 32 位 hex 的密钥一旦进过公开仓库，就等于泄露 —— 即使后来删掉，
+    它仍然留在历史里，只能吊销重发。所以推之前必须机械地拦一道。"""
+    files = git_tracked()
+    if files is None:
+        files = list(walk_files())
+    bad, scanned = [], 0
+    for rel in files:
+        if os.path.splitext(rel)[1].lower() not in SCAN_EXTS:
+            continue
+        p = os.path.join(ROOT, rel)
+        if not os.path.isfile(p) or os.path.getsize(p) > 4 * 1024 * 1024:
+            continue
+        scanned += 1
+        try:
+            text = open(p, "r", encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for pat in CREDENTIAL_PATTERNS:
+            m = pat.search(text)
+            if m:
+                frag = m.group(0)[:24]
+                bad.append("%s: %s..." % (rel, frag))
+    if bad:
+        raise Fail("疑似硬编码凭据（%s）—— 公开仓库里等同于泄露，必须改环境变量/凭据文件"
+                   % "；".join(sorted(set(bad))[:5]))
+    return "%d 个文本文件已扫描，未发现硬编码凭据" % scanned
+
+
 @gate("ci-entrypoints", "CI 流水线 / 本地钩子 / ci.bat 里引用的 tools、tests 路径都存在")
 def g_ci_entrypoints(verbose):
     """改个工具名、或者把 tools/xxx.py 挪个位置，CI 与钩子会**静默失效**——
@@ -1040,6 +1083,8 @@ def selfcheck_cases():
                        'void pp_probe(void) { DWORD x = 0; (void)x; }\n')),
         ("ci-entrypoints", "把流水线里引用的工具名改成不存在的一个",
          _subst(".workflow/pluginplayer-ci.yml", "tools/ci.py", "tools/ci_RENAMED.py")),
+        ("no-credentials", "往一个源文件里塞一个硬编码令牌",
+         _append("tools/pp_cli.py", "\nGITEE_TOKEN = \"deadbeefdeadbeefdeadbeefdeadbeef\"\n")),
     ]
 
 

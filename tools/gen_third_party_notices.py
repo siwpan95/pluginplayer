@@ -197,19 +197,22 @@ def is_runtime_artifact(rel):
     return False
 
 
-def dist_payload(include_artifacts=False):
+def dist_payload(include_artifacts=False, dist=None):
     """dist/ 的文件清单。
 
     include_artifacts=False（默认）给出的是**发布载荷** —— 与 README 的
     「17 个文件 / 127 MB」同一口径；True 则连运行期产物一起列，用来说明差异。
+    dist 可指定别的目录（tools/gitee_release.py 上传发布物时会复用它，
+    以免"哪些文件算发布载荷"出现第二份定义）。
     """
-    if not os.path.isdir(DIST):
+    root = DIST if dist is None else dist
+    if not os.path.isdir(root):
         return None
     files = []
-    for root, _dirs, fs in os.walk(DIST):
+    for cur, _dirs, fs in os.walk(root):
         for f in fs:
-            p = os.path.join(root, f)
-            rel = os.path.relpath(p, DIST).replace("\\", "/")
+            p = os.path.join(cur, f)
+            rel = os.path.relpath(p, root).replace("\\", "/")
             if not include_artifacts and is_runtime_artifact(rel):
                 continue
             files.append((rel, os.path.getsize(p)))

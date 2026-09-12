@@ -1,5 +1,9 @@
 # PluginPlayer — 插件版播放器
 
+> 仓库：<https://gitee.com/siwpan/pluginplayer> ·
+> 许可：[GPL-3.0-or-later](LICENSE)（原因见「开源与合规」）·
+> 发行版：<https://gitee.com/siwpan/pluginplayer/releases>
+
 用 `potplayer-master`（其实是 [itisyang/playerdemo](https://github.com/itisyang/playerdemo)，
 一个「开源版 potplayer」的 Qt5 + FFmpeg + SDL2 播放器 demo）的解码/渲染思路做参考，
 用 **FFmpeg 9.0.1 + SDL3 3.4.16** 重写内核，并把**一切功能做成插件**：
@@ -169,7 +173,7 @@ SDL3/FFmpeg 的 Windows 二进制 + Winsock2。所以：
 散文约束不了它们，所以每条「两处必须相等」的断言都被写成了可执行检查：
 
 ```bat
-F:\Python314\python.exe tools\verify.py              :: 17 条门禁，<1 秒，不需要构建产物
+F:\Python314\python.exe tools\verify.py              :: 18 条门禁，<1 秒，不需要构建产物
 F:\Python314\python.exe tools\verify.py --list       :: 看有哪些
 F:\Python314\python.exe tools\verify.py --selfcheck  :: 对每条门禁做一次故意破坏，断言它必须报红
 ```
@@ -356,8 +360,9 @@ pluginplayer/
 │     python/                          ★ Python 单元测试（95 项，标准库 unittest）
 ├─ tools/fetch_deps.py                 依赖准备；rpc_client.py 控制通道测试客户端（带令牌）
 │     pp_cli.py                        ★ 命令行接口本体（生成 pluginplayer 命令）
-│     verify.py                        ★ 机械门禁（17 条，<1 秒，--selfcheck 证明它们拦得住）
+│     verify.py                        ★ 机械门禁（18 条，<1 秒，--selfcheck 证明它们拦得住）
 │     ci.py                            ★ CI 编排（分阶段，前提缺失记 SKIP 并说明原因）
+│     gitee_release.py                   Gitee 建仓 / 转公开 / 发发行版（幂等，可分步重跑）
 │     gen_third_party_notices.py        第三方组件声明生成器（依赖/许可证据有变就得重跑）
 ├─ pluginplayer.cmd / pp.cmd           命令垫片（纯 ASCII + CRLF，install-cli 生成）
 ├─ ci.bat                              一键 CI（跑 tools/ci.py；与 run/selftest 同套生成方式）
@@ -606,10 +611,10 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 
 `quit` 之后复查端口：`port 7911 已释放，播放器已退出`。
 
-### 11. 机械门禁 `tools/verify.py` —— 17/17 通过，自检 18/18
+### 11. 机械门禁 `tools/verify.py` —— 18/18 通过，自检 19/19
 
 ```
-==== 机械门禁: 17/17 通过，跳过 0 项，失败 0 项 ====
+==== 机械门禁: 18/18 通过，跳过 0 项，失败 0 项 ====
 
 [PASS] bat-ascii-crlf       4 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR
 [PASS] plugin-manifest      5 个 DLL 哈希与清单逐一相符
@@ -643,8 +648,8 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] arg-bounds-align       拦住了：把 CLI 的窗口最小边改成 161（与 app.h 不符）
 [PASS] plugin-manifest        拦住了：把已登记插件改 1 个字节（必须靠重算哈希发现）
 [PASS] portable-modules       拦住了：在可移植模块的空行处塞一句 Windows API 调用
-...                                                            （共 18 项）
-==== 门禁自检: 18/18 通过，跳过 0 项，失败 0 项 ====
+...                                                            （共 19 项）
+==== 门禁自检: 19/19 通过，跳过 0 项，失败 0 项 ====
 ```
 
 这条自检**已经产出了真实收益**，抓出的问题都不是顺手看到的：
@@ -706,7 +711,7 @@ C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个�
 | 外部控制 | 无 | JSON-RPC 控制通道 |
 | 精确 seek | 无 | 有（seek 后丢帧对齐，`dropBefore_`） |
 | 音频时钟 | 音频/视频/外部三种主时钟 | 音频优先 + **停滞自动退回墙钟** |
-| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（170 项）、`tools/verify.py` 17 条机械门禁（含自检）、`ci.bat` 一键编排 |
+| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（170 项）、`tools/verify.py` 18 条机械门禁（含自检）、`ci.bat` 一键编排 |
 | 外部控制的安全 | 无外部控制 | JSON-RPC 强制令牌认证 + 报文/并发上限；网络输入默认拒绝 |
 
 ---

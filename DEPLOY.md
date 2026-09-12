@@ -164,3 +164,65 @@ dist\pluginplayer.exe --list-plugins        :: 插件全部加载成功才算好
 pluginplayer doctor
 pluginplayer --json doctor > doctor.json
 ```
+
+---
+
+## 7. 发布流程（Gitee）
+
+把"发一个版本"从手工点网页变成可复现的命令。工具在 `tools/gitee_release.py`，
+每个子命令都是幂等的（已存在就跳过），中断了直接重跑即可。
+
+```bat
+:: 0) 令牌：绝不写进仓库。用环境变量或凭据文件指定
+set GITEE_TOKEN=<你的令牌>
+::   或： --token-file "G:\私人令牌.txt"
+
+:: 1) 全量回归必须先绿（发布构建会清空 dist/，先跑完测试）
+ci.bat
+F:\Python314\python.exe build.py --release
+F:\Python314\python.exe tools\verify.py
+
+:: 2) 打标签并推送（tag 要落在"全量回归通过的那个提交"上）
+F:\Python314\python.exe tools\gitee_release.py release --name pluginplayer ^
+    --tag v1.0.0 --title "PluginPlayer v1.0.0" --notes-file release-notes.md
+
+:: 3) 上传发行版附件
+F:\Python314\python.exe tools\gitee_release.py attach --name pluginplayer ^
+    --tag v1.0.0 --file pluginplayer-v1.0.0-win64.zip --file SHA256SUMS.txt
+```
+
+### 为什么发**一个 zip**而不是 dist/ 里的 17 个文件
+
+| 事实 | 数字 |
+|---|---|
+| 发布载荷（解压后） | 17 个文件 / **127 MB** |
+| 压成一个 zip | **47.9 MB**（2.65x） |
+| Gitee 单附件上限（社区版） | **100 MB** |
+| Gitee 仓库总附件上限 | 1 GB |
+
+127MB 的散文件虽然每个都低于 100MB 能传，但**不能用目录路径命名附件**
+（`plugins/osd_stats.dll` 会变成 `plugins__osd_stats.dll`，用户还得手动摆目录）。
+压缩后一个文件 47.9MB 就够了，用户体验和配额都更好。
+
+### 平台坑（都实测撞过，别再撞第二遍）
+
+- `PATCH /repos/{owner}/{repo}` **必须带 `name` 字段**，否则 `400 name is missing`
+  —— 转公开时会踩到。
+- `GET /releases/tags/{tag}` 在 tag 不存在时返回 **200 + `null`**，不是 404。
+  只判状态码会走进"已存在"分支然后对 `None` 取属性。
+- 建仓要用 `auto_init: false`，否则会多一个无关的初始提交，默认分支也不再是你推的那个。
+- 发行版响应里的 `html_url` 可能为 `null`；网页地址按
+  `https://gitee.com/{owner}/{repo}/releases/{tag}` 构造。
+- **发布页上 Gitee 自动附的源码包链接不是直链**：匿名 HTTP 客户端拿到的是一段 HTML。
+  GPL 义务要求的源码指向写 `git clone` 地址，不要依赖那两个链接。
+- 上传 47.9MB 实测约 20 秒；单附件超过 100MB 会被拒。
+
+### 发布前逐条打勾
+
+- [ ] `ci.bat` 全绿，且 `build.py --release` 的载荷口径与 README 一致（`release-payload` 门禁）
+- [ ] `tools/verify.py` 18/18（含 `no-credentials`：**确认没有把令牌提交进去**）
+- [ ] `THIRD_PARTY_NOTICES.md` 已重新生成（依赖或许可证据有变时）
+- [ ] tag 指向全量回归通过的那个提交
+- [ ] 发行说明里有：系统要求、安装步骤、**GPL v3 义务与对应源码指向**、实测数据、已知限制
+- [ ] 附件的 SHA-256 写进说明或 `SHA256SUMS.txt`
+- [ ] 上传后**回下载一次比对哈希**（别只看"上传成功"）

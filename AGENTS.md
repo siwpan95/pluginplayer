@@ -20,7 +20,8 @@ examples/hello_plugin/    最小原生插件示例（PLUGIN_GUIDE 逐行讲解�
 tests/                    冒烟（smoke_link / smoke_audio）、插件 API 回归、CLI 回归（cli_check.py）、
                           unit/（C++ 单元测试 + 零依赖 harness）、python/（标准库 unittest）
 tools/                    fetch_deps（依赖）、rpc_client（协议测试客户端）、
-                          pp_cli（命令行接口）、verify（17 条机械门禁）、ci（CI 编排）、
+                          pp_cli（命令行接口）、verify（18 条机械门禁）、ci（CI 编排）、
+                          gitee_release（建仓/转公开/发发行版）、
                           gen_third_party_notices（第三方声明生成器）
 docs/                     文档（索引在 docs/README.md）
 .workflow/                Gitee Go 流水线（只跑可移植子集，原因写在文件头）
@@ -40,7 +41,7 @@ F:\Python314\python.exe build.py --unit            :: C++ 单元测试（不需�
 F:\Python314\python.exe build.py --smoke           :: 工具链冒烟
 F:\Python314\python.exe build.py --apitest         :: 编译插件 API 回归插件
 F:\Python314\python.exe build.py --release         :: 出发布物（干净重建 + 清理 + 清单）
-F:\Python314\python.exe tools\verify.py            :: 17 条机械门禁（<1 秒，不需构建产物）
+F:\Python314\python.exe tools\verify.py            :: 18 条机械门禁（<1 秒，不需构建产物）
 F:\Python314\python.exe tools\verify.py --selfcheck :: 对每条门禁故意破坏，断言它必须报红
 F:\Python314\python.exe tools\ci.py                :: CI 编排（分阶段，前提缺失记 SKIP）
 F:\Python314\python.exe tests\cli_check.py         :: CLI 回归（端到端）

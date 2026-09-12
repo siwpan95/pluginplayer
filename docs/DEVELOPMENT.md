@@ -129,6 +129,7 @@ F:\Python314\python.exe tools\verify.py --verbose       :: 打印每条检查的
 | `release-payload` | `dist/` 的发布载荷数量/体积与 README 记录的口径一致（容差 ±3 MB） |
 | `portable-modules` | 可移植模块与单元测试里的 Windows API **只出现在 `#ifdef _WIN32` 分支内** —— 这是 Linux CI 能跑 C++ 测试的前提 |
 | `ci-entrypoints` | `.workflow/*.yml`、`.githooks/pre-commit`、`ci*.bat` 里引用的 `tools/`、`tests/` 路径都真实存在 |
+| `no-credentials` | 被跟踪的文本文件里没有硬编码的令牌/私钥 —— 公开仓库里一条 32 位 hex 的密钥进了历史就只能吊销重发，所以推之前机械拦一道 |
 
 **新鲜度 / 文档**
 
