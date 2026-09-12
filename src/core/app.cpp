@@ -160,6 +160,18 @@ void App::applyAudioParams() {
 /* ======================= 媒体 ======================= */
 
 bool App::openMedia(const std::string& path) {
+    /* 默认拒绝网络输入：控制通道与插件都能触发 openMedia，
+     * 若默认放行就等于给本机装了一个「代任意来源出网」的原语（SSRF）。
+     * 需要播放 http/rtsp/UNC 时用 --allow-network-input 显式开启。 */
+    if (!allowNetworkInput_ && isNetworkInput(path)) {
+        lastError_ = format("已拒绝网络输入（默认只允许本地文件）: %s", path.c_str());
+        PP_WARN("%s；确需播放网络流或 UNC 路径请加 --allow-network-input", lastError_.c_str());
+        publishEvent(PP_TOPIC_PLAY_ERROR,
+                     format("{\"path\":\"%s\",\"message\":\"%s\"}",
+                            jsonEscape(path).c_str(),
+                            jsonEscape(lastError_).c_str()).c_str());
+        return false;
+    }
     completedFired_ = false;
     lastUploadedIndex_ = -1;
     closeAudio();
@@ -480,6 +492,9 @@ void App::tickPlugins() {
 
 void App::run() {
     while (!quit_) {
+        /* 控制通道的请求在主线程执行：必须在每帧开头把队列抽干，
+         * 否则 RPC 客户端会等到超时（见 RpcServer::pumpMainThread）。 */
+        rpc_.pumpMainThread();
         pollEvents();
         pumpAndUpload();
         stepAudioLead();
@@ -516,11 +531,18 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
 
     PP_INFO("==== 自检开始 ====");
 
-    struct StepResult { std::string name; bool ok; std::string detail; };
+    struct StepResult { std::string name; bool ok; bool skipped; std::string detail; };
     std::vector<StepResult> steps;
     auto addStep = [&](const std::string& n, bool ok, const std::string& d) {
-        steps.push_back({n, ok, d});
+        steps.push_back({n, ok, false, d});
         PP_INFO("[%s] %s — %s", ok ? "PASS" : "FAIL", n.c_str(), d.c_str());
+    };
+    /* 不适用（而非"通过"）：单独标记 skipped，绝不混进 PASS 计数。
+     * 早期版本把「媒体时长短、seek 校验跳过」直接计为 PASS，等于让自检
+     * 在最需要它的短用例上失去把关能力。 */
+    auto skipStep = [&](const std::string& n, const std::string& d) {
+        steps.push_back({n, false, true, d});
+        PP_WARN("[SKIP] %s — %s", n.c_str(), d.c_str());
     };
 
     addStep("sdl_init", win_ != nullptr && ren_ != nullptr,
@@ -554,50 +576,85 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         return 2;
     }
 
-    /* --- 解码/显示 N 帧 --- */
+    /* --- 解码/显示 N 帧 ---
+     * 断言必须真的能判失败：目标是「frames 与媒体实际可用帧数中的较小者」，
+     * 并且超时也要判失败。早期版本只要求 displayed >= min(frames,5)，
+     * 等于「显示 5 帧就算过」。 */
     int displayed = 0;
     int savedPngs = 0;
     int chainDropped = 0;
-    double deadline = (double)SDL_GetTicks() / 1000.0 + 60.0;
+    int framesAvail = frames;
+    if (mi.has_video && mi.duration > 0 && mi.fps > 0.001)
+        framesAvail = (int)(mi.duration * mi.fps);
+    if (framesAvail < 1) framesAvail = 1;
+    const int frameTarget = std::min(frames, framesAvail);
 
-    while (displayed < frames && (double)SDL_GetTicks() / 1000.0 < deadline) {
-        player_.pumpFrame();
-        auto frame = player_.currentFrame();
-        if (frame && frame->index != lastUploadedIndex_) {
-            lastUploadedIndex_ = frame->index;
+    if (!mi.has_video) {
+        /* 无视频轨：自检的核心是视频解码路径，这里不能假装通过，
+         * 也不该硬等 60 秒 —— 直接快速判定失败。 */
+        addStep("decode_and_display", false,
+                format("媒体没有视频轨（音频编码 %s），自检需要视频轨道，无法验证解码/渲染链路",
+                       mi.audio_codec));
+    } else {
+        double budget = mi.duration > 0 ? mi.duration * 2.0 + 10.0 : 60.0;
+        if (budget > 60.0) budget = 60.0;
+        if (budget < 10.0) budget = 10.0;
+        double deadline = (double)SDL_GetTicks() / 1000.0 + budget;
 
-            PP_FrameView view{};
-            view.data = frame->rgba.data();
-            view.width = frame->w;
-            view.height = frame->h;
-            view.pitch = frame->pitch;
-            view.format = PP_PIXFMT_RGBA8888;
-            view.pts = frame->pts;
-            view.index = frame->index;
-            view.serial = frame->serial;
-            int cr = host_.runFrameChain(&view);
-            if (cr == PP_CHAIN_DROP) { chainDropped++; continue; }
+        /* 可接受下限：frameTarget-1。
+         * 最后一帧常常在 EOF 边界被 demux/decoder 冲掉，这不是缺陷；
+         * 但少 2 帧以上说明解码链路真有问题 —— 所以不能像早期版本那样
+         * 只要显示 5 帧就算通过。 */
+        const int frameMin = std::max(1, frameTarget - 1);
+        int stall = 0;
+        while (displayed < frameTarget && (double)SDL_GetTicks() / 1000.0 < deadline) {
+            rpc_.pumpMainThread();
+            player_.pumpFrame();
+            auto frame = player_.currentFrame();
+            if (frame && frame->index != lastUploadedIndex_) {
+                stall = 0;
+                lastUploadedIndex_ = frame->index;
 
-            displayed++;
+                PP_FrameView view{};
+                view.data = frame->rgba.data();
+                view.width = frame->w;
+                view.height = frame->h;
+                view.pitch = frame->pitch;
+                view.format = PP_PIXFMT_RGBA8888;
+                view.pts = frame->pts;
+                view.index = frame->index;
+                view.serial = frame->serial;
+                int cr = host_.runFrameChain(&view);
+                if (cr == PP_CHAIN_DROP) { chainDropped++; continue; }
 
-            /* 存 3 张帧 PNG 作为可视证据 */
-            if (savedPngs < 3 && (displayed == 1 || displayed == frames / 2 || displayed == frames)) {
-                std::string p = pathJoin(outDir, format("frame_%03d.png", savedPngs + 1));
-                if (writePngRGBA(p, frame->rgba.data(), frame->w, frame->h, frame->pitch)) {
-                    savedPngs++;
-                    PP_INFO("已保存帧快照: %s (%dx%d, pts=%.3f)",
-                            p.c_str(), frame->w, frame->h, frame->pts);
+                displayed++;
+
+                /* 存 3 张帧 PNG 作为可视证据 */
+                if (savedPngs < 3 &&
+                    (displayed == 1 || displayed == frameTarget / 2 || displayed == frameTarget)) {
+                    std::string p = pathJoin(outDir, format("frame_%03d.png", savedPngs + 1));
+                    if (writePngRGBA(p, frame->rgba.data(), frame->w, frame->h, frame->pitch)) {
+                        savedPngs++;
+                        PP_INFO("已保存帧快照: %s (%dx%d, pts=%.3f)",
+                                p.c_str(), frame->w, frame->h, frame->pts);
+                    }
                 }
+            } else {
+                stall++;
             }
+            /* 已到媒体末尾且约 0.5 秒没新帧：不必白等到 deadline */
+            if (player_.finished() && stall > 250) break;
+            SDL_Delay(2);
         }
-        SDL_Delay(2);
+        bool hitDeadline = (double)SDL_GetTicks() / 1000.0 >= deadline;
+        addStep("decode_and_display", displayed >= frameMin,
+                format("显示 %d 帧（目标 %d，可接受下限 %d；媒体约 %d 帧可用）%s，被插件丢弃 %d 帧",
+                       displayed, frameTarget, frameMin, framesAvail,
+                       hitDeadline ? "（触达时限）" : "", chainDropped));
     }
-    addStep("decode_and_display", displayed >= std::min(frames, 5),
-            format("显示 %d 帧（目标 %d），被插件丢弃 %d 帧", displayed, frames, chainDropped));
 
     /* --- seek --- */
     bool seekOk = false;
-    std::string seekDetail = "媒体时长过短，跳过";
     double posAfterSeek = 0.0;
     if (player_.duration() > 2.0) {
         double target = player_.duration() * 0.6;
@@ -605,18 +662,32 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         int got = 0;
         double dl = (double)SDL_GetTicks() / 1000.0 + 20.0;
         double lastIdx = (double)lastUploadedIndex_;
-        while (got < 5 && (double)SDL_GetTicks() / 1000.0 < dl) {
-            player_.pumpFrame();
-            auto f = player_.currentFrame();
-            if (f && f->index != lastUploadedIndex_) { lastUploadedIndex_ = f->index; got++; }
-            SDL_Delay(2);
+        if (mi.has_video) {
+            while (got < 5 && (double)SDL_GetTicks() / 1000.0 < dl) {
+                rpc_.pumpMainThread();
+                player_.pumpFrame();
+                auto f = player_.currentFrame();
+                if (f && f->index != lastUploadedIndex_) { lastUploadedIndex_ = f->index; got++; }
+                SDL_Delay(2);
+            }
         }
         posAfterSeek = player_.position();
-        seekOk = (got >= 5) && (std::fabs(posAfterSeek - target) < 3.0);
-        seekDetail = format("目标 %.2f s，seek 后位置 %.2f s，新显示 %d 帧 (上一帧 index=%.0f)",
-                            target, posAfterSeek, got, lastIdx);
+        if (mi.has_video) {
+            seekOk = (got >= 5) && (std::fabs(posAfterSeek - target) < 3.0);
+            addStep("seek", seekOk,
+                    format("目标 %.2f s，seek 后位置 %.2f s，新显示 %d 帧 (上一帧 index=%.0f)",
+                           target, posAfterSeek, got, lastIdx));
+        } else {
+            /* 无视频轨时像素层面无法校验，只能校验位置——如实说明，不冒充完整校验 */
+            seekOk = std::fabs(posAfterSeek - target) < 3.0;
+            addStep("seek", seekOk,
+                    format("目标 %.2f s，seek 后位置 %.2f s（媒体无视频轨，仅校验位置，未校验帧输出）",
+                           target, posAfterSeek));
+        }
+    } else {
+        skipStep("seek", format("媒体时长 %.2f s <= 2.0 s，不适用 seek 校验（未验证）",
+                                player_.duration()));
     }
-    addStep("seek", seekOk || player_.duration() <= 2.0, seekDetail);
 
     /* --- 调用插件命令（约定：argv 只含实参，不含命令名） --- */
     const char* snapArgv[1] = { outDir.c_str() };
@@ -690,10 +761,15 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         int afterCmds = host_.commands().count();
         int afterSvcs = host_.services().count();
         int afterProc = host_.chain().count();
-        reloadDetail = format("重载后 订阅 %d->%d, 命令 %d->%d, 服务 %d->%d, 帧处理器 %d->%d",
+        bool noLeak = (afterSubs == beforeSubs) && (afterCmds == beforeCmds) &&
+                      (afterSvcs == beforeSvcs) && (afterProc == beforeProc);
+        reloadDetail = format("重载后 订阅 %d->%d, 命令 %d->%d, 服务 %d->%d, 帧处理器 %d->%d%s",
                               beforeSubs, afterSubs, beforeCmds, afterCmds,
-                              beforeSvcs, afterSvcs, beforeProc, afterProc);
-        reloadOk = reloadOk && host_.commands().count() > 0;
+                              beforeSvcs, afterSvcs, beforeProc, afterProc,
+                              noLeak ? "（无泄漏）" : "（数量不一致：注册未干净撤销）");
+        /* 泄漏必须判失败：早期版本只断言 commands>0，收集了泄漏证据却从不断言，
+         * 等价于这项检查永远为绿。 */
+        reloadOk = reloadOk && afterCmds > 0 && noLeak;
     } else {
         reloadDetail = "没有插件可重载";
     }
@@ -704,14 +780,19 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     PP_PlaybackStats st{};
     player_.fillStats(&st);
 
-    int pass = 0;
-    for (const auto& s : steps) if (s.ok) pass++;
+    int pass = 0, counted = 0, skippedN = 0;
+    for (const auto& s : steps) {
+        if (s.skipped) { skippedN++; continue; }   /* 不适用 ≠ 通过 */
+        counted++;
+        if (s.ok) pass++;
+    }
 
     std::string j;
     j += "{\n";
     j += "  \"tool\": \"pluginplayer selftest\",\n";
-    j += format("  \"result\": \"%s\",\n", pass == (int)steps.size() ? "PASS" : "FAIL");
-    j += format("  \"pass\": %d,\n  \"total\": %d,\n", pass, (int)steps.size());
+    j += format("  \"result\": \"%s\",\n", pass == counted ? "PASS" : "FAIL");
+    j += format("  \"pass\": %d,\n  \"total\": %d,\n  \"skipped\": %d,\n",
+                pass, counted, skippedN);
     j += format("  \"elapsed_sec\": %.3f,\n", elapsed);
     j += format("  \"media\": {\"path\":\"%s\",\"format\":\"%s\",\"video_codec\":\"%s\","
                 "\"audio_codec\":\"%s\",\"width\":%d,\"height\":%d,\"fps\":%.4f,"
@@ -733,8 +814,9 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     j += format("  \"plugins\": %s,\n", plugins_.jsonSummary().c_str());
     j += "  \"steps\": [\n";
     for (size_t i = 0; i < steps.size(); ++i) {
-        j += format("    {\"name\":\"%s\",\"ok\":%s,\"detail\":\"%s\"}%s\n",
+        j += format("    {\"name\":\"%s\",\"ok\":%s,\"skipped\":%s,\"detail\":\"%s\"}%s\n",
                     jsonEscape(steps[i].name).c_str(), steps[i].ok ? "true" : "false",
+                    steps[i].skipped ? "true" : "false",
                     jsonEscape(steps[i].detail).c_str(),
                     i + 1 < steps.size() ? "," : "");
     }
@@ -743,9 +825,12 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     FILE* f = fopen(reportPath.c_str(), "wb");
     if (f) { fwrite(j.data(), 1, j.size(), f); fclose(f); }
     PP_INFO("自检报告已写入: %s", reportPath.c_str());
-    PP_INFO("==== 自检结束: %d/%d 项通过，用时 %.2f s ====", pass, (int)steps.size(), elapsed);
+    if (skippedN > 0)
+        PP_WARN("有 %d 项检查不适用而跳过（未验证，不计入通过数）", skippedN);
+    PP_INFO("==== 自检结束: %d/%d 项通过，跳过 %d 项，用时 %.2f s ====",
+            pass, counted, skippedN, elapsed);
 
-    return pass == (int)steps.size() ? 0 : 1;
+    return pass == counted ? 0 : 1;
 }
 
 std::string App::statusLine() const {

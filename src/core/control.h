@@ -27,10 +27,12 @@
  */
 #include <string>
 #include <vector>
+#include <deque>
 #include <thread>
 #include <mutex>
 #include <memory>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 
 #include "host.h"
@@ -44,6 +46,7 @@ public:
     static constexpr int    kMaxClients     = 8;                    /* 并发连接上限 */
     static constexpr int    kIdleTimeoutMs  = 30000;                /* recv 空闲超时 */
     static constexpr int    kSendTimeoutMs  = 10000;                /* send 超时 */
+    static constexpr int    kRequestTimeoutSec = 10;                /* 等主线程执行的上限 */
 
     ~RpcServer();
 
@@ -57,13 +60,25 @@ public:
     int  port() const { return port_; }
     int  clientCount() const;
 
+    /**
+     * 主线程每帧调用一次：把工作线程收到的请求搬到主线程执行。
+     *
+     * 为什么必须这样做：Player / Host 的大量状态（extPts_、lastAudioClock_、
+     * 当前帧、解码器、SDL 音频流…）都不是原子的，只被主循环读写。
+     * 早期版本让 RPC 工作线程直接调用 handleRequest，于是 JS 宿主每 5 秒轮询
+     * 一次 stats 就会和主循环并发改写这些字段（数据竞争）。
+     * 现在所有请求都经由这个队列在主线程串行执行，主循环状态只被一个线程触碰。
+     */
+    void pumpMainThread();
+
     /** 本次运行的认证令牌（64 位 hex）。 */
     const std::string& token() const { return token_; }
 
     /** 生成 256-bit 随机令牌（32 字节 → 64 位小写 hex，使用系统 CSPRNG）。 */
     static std::string generateToken();
 
-    /** 把宿主事件转发给已订阅该主题的**已认证**客户端。 */
+    /** 把宿主事件转发给已订阅该主题的**已认证**客户端。
+     *  只会在主线程调用（Host::publishTopic 的所有来源都在主线程）。 */
     void broadcastEvent(const std::string& topic, const std::string& json);
 
 private:
@@ -85,8 +100,23 @@ private:
         }
     };
 
+    /* 工作线程 → 主线程的请求信封 */
+    struct Pending {
+        std::string             line;
+        std::shared_ptr<Client> client;
+        std::string             response;
+        bool                    done = false;
+        std::mutex              mu;
+        std::condition_variable cv;
+        std::atomic<bool>       abandoned{false};
+    };
+
     void acceptLoop();
     void clientLoop(std::shared_ptr<Client> c);
+    /** 交主线程执行并等待结果；返回 false 表示超时/被放弃。 */
+    bool dispatchToMainThread(const std::string& line,
+                              const std::shared_ptr<Client>& c,
+                              std::string* out);
     std::string handleRequest(const std::string& line, const std::shared_ptr<Client>& c);
     void sendLine(uintptr_t sock, const std::string& s);
     /** 线程安全地给单个客户端发一行（内部取 c->mu）。 */
@@ -102,6 +132,10 @@ private:
     std::atomic<int64_t>   served_{0};
     std::atomic<int64_t>   authFailures_{0};
     std::string            token_;
+
+    /* 主线程执行队列 */
+    mutable std::mutex                     qmu_;
+    std::deque<std::shared_ptr<Pending>>   queue_;
 };
 
 } // namespace pp

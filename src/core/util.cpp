@@ -197,6 +197,25 @@ bool pathIsInside(const std::string& child, const std::string& root) {
     return sep == '/' || sep == '\\';
 }
 
+bool isNetworkInput(const std::string& s) {
+    if (s.empty()) return false;
+    /* UNC：\\host\share 或 //host/share */
+    if (s.size() >= 2 &&
+        ((s[0] == '\\' && s[1] == '\\') || (s[0] == '/' && s[1] == '/'))) {
+        return true;
+    }
+    /* scheme:// */
+    size_t i = s.find("://");
+    if (i == std::string::npos || i < 2) return false;   /* i<2 排除盘符 "C://" */
+    for (size_t k = 0; k < i; ++k) {
+        char c = s[k];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 bool fileExists(const std::string& p) {
 #ifdef _WIN32
     DWORD a = GetFileAttributesA(p.c_str());

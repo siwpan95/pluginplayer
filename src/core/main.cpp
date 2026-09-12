@@ -8,6 +8,7 @@
  *   --list-plugins          列出插件加载报告后退出
  *   --no-audio              不打开音频设备（静音播放 / 无音频环境下使用）
  *   --hidden                不显示窗口（配合控制通道做无人值守控制）
+ *   --allow-network-input   允许打开 http/rtsp/UNC 等网络输入（默认拒绝）
  *   --size WxH              初始窗口尺寸（默认 1280x720；范围 160..8192）
  *   --start SEC             从指定秒数开始播放
  *   --volume V              初始音量 0..1（默认 1.0）
@@ -89,6 +90,7 @@ static void printHelp() {
         "  --list-plugins        列出插件加载报告后退出\n"
         "  --no-audio            不打开音频设备\n"
         "  --hidden              不显示窗口（配合控制通道做无人值守控制）\n"
+        "  --allow-network-input 允许打开 http/rtsp/UNC 等网络输入（默认拒绝）\n"
         "  --size WxH            初始窗口尺寸（默认 1280x720，范围 160..8192）\n"
         "  --start SEC           从指定秒数开始播放\n"
         "  --volume V            初始音量 0..1（默认 1.0）\n"
@@ -118,6 +120,7 @@ int main(int argc, char** argv) {
     int  reloadIndex = -1;
     bool noAudio = false;
     bool hidden = false;
+    bool allowNetworkInput = false;
     bool selfTest = false;
     bool listPlugins = false;
     int  rpcPort = 7911;
@@ -139,6 +142,7 @@ int main(int argc, char** argv) {
         else if (a == "--list-plugins") listPlugins = true;
         else if (a == "--no-audio") noAudio = true;
         else if (a == "--hidden") hidden = true;
+        else if (a == "--allow-network-input") allowNetworkInput = true;
         else if (a == "--selftest") selfTest = true;
         else if (a == "--size") {
             const char* v = next("--size");
@@ -228,6 +232,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "初始化失败\n");
         return 3;
     }
+    app.setAllowNetworkInput(allowNetworkInput);
 
     /* 插件写入白名单：默认只允许 exeDir（见 Host::addWriteRoot）。
      * 需要让插件往别的目录写（例如截图存到视频目录）时用 --write-dir 追加。 */
@@ -265,9 +270,12 @@ int main(int argc, char** argv) {
 
     /* 控制通道：进程外插件（host-js / Cordis、外部脚本）从这里驱动播放器。
      * 强制令牌认证：令牌每次启动随机生成，落入 <exeDir>/config/rpc-token.txt，
-     * 客户端必须先 auth 才能调用任何方法（详见 control.h 的安全模型）。 */
+     * 客户端必须先 auth 才能调用任何方法（详见 control.h 的安全模型）。
+     *
+     * 注意：只有控制通道**真正监听成功**才写令牌文件。否则第二个实例在端口被
+     * 占用时会用新令牌覆盖掉正在运行实例的令牌文件，把它的所有客户端一起搞坏。 */
     std::string rpcToken = rpcTokenArg.empty() ? RpcServer::generateToken() : rpcTokenArg;
-    if (rpcPort > 0 && rpcPort <= 65535) {
+    if (app.startRpc(rpcPort, rpcToken)) {
         std::string tokDir  = pathJoin(base, "config");
         std::string tokPath = pathJoin(tokDir, "rpc-token.txt");
         makeDirs(tokDir);
@@ -280,10 +288,11 @@ int main(int argc, char** argv) {
             PP_WARN("无法写入令牌文件: %s（客户端可用 --rpc-token 直接传入）", tokPath.c_str());
         }
         printf("控制通道: 127.0.0.1:%d   令牌文件: %s\n", rpcPort, tokPath.c_str());
-    }
-    if (!app.startRpc(rpcPort, rpcToken)) {
-        if (rpcPort > 0)
-            fprintf(stderr, "控制通道启动失败（端口 %d 不可用），播放器继续运行。\n", rpcPort);
+    } else if (rpcPort > 0) {
+        fprintf(stderr,
+                "控制通道启动失败（端口 %d 不可用），播放器继续运行。\n"
+                "  提示：可能已有另一个实例在监听该端口；本实例未写入令牌文件，\n"
+                "        以免影响正在运行实例的客户端。\n", rpcPort);
     }
 
     int rc = 0;

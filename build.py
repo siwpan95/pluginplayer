@@ -40,6 +40,10 @@ CORE_SOURCES = [
 # 插件目录名 -> 输出 DLL 名
 PLUGINS = ["osd_stats", "video_effects", "audio_viz", "snapshot", "hotkey_ext"]
 
+# tests/ 下的冒烟测试：编译后立即运行，退出码 0 视为通过。
+# 早期版本这两个文件不被任何脚本引用 —— 等于没有测试入口。
+SMOKE_TESTS = ["smoke_link", "smoke_audio"]
+
 CXXFLAGS = [
     "-std=c++17", "-O2", "-Wall", "-Wextra",
     "-Wno-unused-parameter", "-DNDEBUG", "-s",     # -s: 去符号，发布体积小
@@ -73,12 +77,23 @@ LDFLAGS_CORE = [
 LDFLAGS_PLUGIN = ["-shared"] + STATIC_RUNTIME
 
 
-def run(cmd, cwd=ROOT, quiet=False):
+def run(cmd, cwd=ROOT, quiet=False, env=None):
     if not quiet:
         print("  $ " + " ".join(cmd))
     p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       text=True, encoding="utf-8", errors="replace")
+                       text=True, encoding="utf-8", errors="replace", env=env)
     return p.returncode, p.stdout
+
+
+def runtime_env():
+    """运行产物需要的 PATH：dist/ 与 vendor 下的 DLL 目录。
+    （build/*.exe 与 dist/ 不在同一目录，不补 PATH 会报 0xC0000135 找不到 DLL。）"""
+    env = dict(os.environ)
+    extra = [DIST, os.path.join(VENDOR, "sdl3", "bin"), os.path.join(VENDOR, "ffmpeg", "bin")]
+    parts = [p for p in extra if os.path.isdir(p)]
+    if parts:
+        env["PATH"] = os.pathsep.join(parts + [env.get("PATH", "")])
+    return env
 
 
 def check_toolchain():
@@ -127,6 +142,50 @@ def build_plugin(name, flags=None):
         print(f"[FAIL] 插件 {name} 编译失败：\n{log}")
         return False
     print(f"[OK] {out}  ({os.path.getsize(out)/1024:.0f} KB)")
+    return True
+
+
+def build_smoke_test(name, flags=None):
+    """编译并运行 tests/<name>.cpp；退出码 0 视为通过。"""
+    src = os.path.join(ROOT, "tests", name + ".cpp")
+    if not os.path.isfile(src):
+        print(f"[SKIP] 冒烟测试源码不存在: {src}")
+        return False
+    os.makedirs(BUILD, exist_ok=True)
+    out = os.path.join(BUILD, name + ".exe")
+    cmd = [GXX] + (flags or CXXFLAGS) + INCLUDES + [src, "-o", out] + LDFLAGS_CORE
+    rc, log = run(cmd)
+    if rc != 0:
+        print(f"[FAIL] 冒烟测试 {name} 编译失败：\n{log}")
+        return False
+    print(f"[OK] {out}  ({os.path.getsize(out)/1024:.0f} KB)")
+    rc2, out2 = run([out], quiet=True, env=runtime_env())
+    tail = "\n".join([l for l in out2.strip().splitlines() if l.strip()][-6:])
+    if tail:
+        print("  " + tail.replace("\n", "\n  "))
+    print(f"[{'PASS' if rc2 == 0 else 'FAIL'}] 冒烟测试 {name} 运行退出码 {rc2}")
+    if rc2 == 0xC0000135:
+        print("        (0xC0000135 = 找不到 DLL；确认 dist/ 与 vendor/ 下运行时 DLL 已就位)")
+    return rc2 == 0
+
+
+def build_api_test_plugin(flags=None):
+    """编译 tests/plugin_apitest/plugin.cpp → build/plugin_apitest.dll。
+    这是插件 API 的回归测试插件（不随 dist/ 发布）；跑法见该文件头部注释。"""
+    src = os.path.join(ROOT, "tests", "plugin_apitest", "plugin.cpp")
+    if not os.path.isfile(src):
+        print(f"[SKIP] 测试插件源码不存在: {src}")
+        return False
+    os.makedirs(BUILD, exist_ok=True)
+    out = os.path.join(BUILD, "plugin_apitest.dll")
+    cmd = [GXX] + (flags or CXXFLAGS) + INCLUDES + [src, "-o", out] + LDFLAGS_PLUGIN
+    rc, log = run(cmd)
+    if rc != 0:
+        print(f"[FAIL] 测试插件编译失败：\n{log}")
+        return False
+    print(f"[OK] {out}  ({os.path.getsize(out)/1024:.0f} KB)")
+    print("     跑法: 复制到 dist/plugins/ → 启动播放器 → 调用命令 api.check（返回 0 = 通过），"
+          "跑完记得删除该 DLL")
     return True
 
 
@@ -208,6 +267,9 @@ def make_launcher():
                 "  pause & exit /b 1\r\n"
                 ")\r\n"
                 "F:\\Python314\\python.exe build.py || pause\r\n"
+                "echo [1/3] 冒烟测试（tests/smoke_link.cpp + tests/smoke_audio.cpp）\r\n"
+                "F:\\Python314\\python.exe build.py --smoke\r\n"
+                "if errorlevel 1 echo [WARN] 冒烟测试有失败项，详见上方输出\r\n"
                 "cd dist\r\n"
                 "if not exist test_assets mkdir test_assets\r\n"
                 "if not exist test_assets\\sample.mp4 "
@@ -226,6 +288,10 @@ def main():
     ap = argparse.ArgumentParser(description="PluginPlayer 构建脚本")
     ap.add_argument("--clean", action="store_true")
     ap.add_argument("--core", action="store_true", help="只编译内核")
+    ap.add_argument("--smoke", action="store_true",
+                    help="编译并运行 tests/ 下的冒烟测试后退出")
+    ap.add_argument("--apitest", action="store_true",
+                    help="编译插件 API 回归测试插件后退出")
     ap.add_argument("--plugins", default="", help="逗号分隔，只编译指定插件")
     ap.add_argument("--list", action="store_true", help="列出插件")
     ap.add_argument("--no-package", action="store_true")
@@ -237,6 +303,22 @@ def main():
         for p in PLUGINS:
             print(p)
         return 0
+
+    if args.smoke:
+        if not check_toolchain():
+            return 1
+        okAll = True
+        for t in SMOKE_TESTS:
+            okAll &= build_smoke_test(t, CXXFLAGS_DEBUG if args.debug else CXXFLAGS)
+        print(f"\n{'[PASS]' if okAll else '[FAIL]'} 冒烟测试"
+              f"{'全部通过' if okAll else '有失败项'}")
+        return 0 if okAll else 1
+
+    if args.apitest:
+        if not check_toolchain():
+            return 1
+        ok = build_api_test_plugin(CXXFLAGS_DEBUG if args.debug else CXXFLAGS)
+        return 0 if ok else 1
 
     if args.clean:
         for d in (BUILD, DIST):

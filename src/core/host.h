@@ -62,6 +62,16 @@ public:
     /** 撤销某个插件的全部注册，返回撤销条目数。 */
     int revokeAll(int owner);
 
+    /* --- 插件可见的订阅句柄 ---
+     * FrameChain 与 EventBus 各有自己的 nextId_，**都从 1 开始**。
+     * 若 subscribe() 直接把内部 id 返回给插件，两类订阅极易撞号，
+     * 而早期版本的 unsubscribe() 会先扫帧链再退事件总线 → 撤错对象。
+     * 这里由 Host 统一分配插件可见 id，并记录归属，彻底隔离两个命名空间。 */
+    enum class SubKind { EventBus = 0, FrameChain = 1 };
+    int  registerSub(SubKind kind, int realId, int owner);
+    bool takeSub(int id, int* kind, int* realId);
+    void dropSubsOf(int owner);
+
     /* --- 插件写入白名单（安全策略） ---
      * save_png / write_text_file 只允许写进这些目录，默认只有 exeDir()。
      * 可通过 ini 的 security.write_dirs（分号分隔）或命令行 --write-dir 追加。
@@ -145,6 +155,11 @@ private:
 
     /* 插件写入白名单（见 addWriteRoot 注释） */
     std::vector<std::string> writeRoots_;
+
+    /* 插件可见订阅 id → 真实归属（见 SubKind 注释） */
+    struct SubRef { SubKind kind; int realId; int owner; };
+    std::map<int, SubRef> subMap_;
+    int                   nextSubId_ = 1;
 
     PP_HostApi  api_{};
     PP_Host     cHandle_{};

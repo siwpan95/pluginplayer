@@ -80,7 +80,33 @@ int Host::revokeAll(int owner) {
                                         return p && p->owner == owner;
                                     }),
                      frameSubs_.end());
+    dropSubsOf(owner);
     return n;
+}
+
+/* ---- 插件可见订阅句柄：隔离 FrameChain 与 EventBus 的 id 空间 ---- */
+
+int Host::registerSub(SubKind kind, int realId, int owner) {
+    if (realId <= 0) return 0;
+    int id = nextSubId_++;
+    subMap_[id] = SubRef{kind, realId, owner};
+    return id;
+}
+
+bool Host::takeSub(int id, int* kind, int* realId) {
+    auto it = subMap_.find(id);
+    if (it == subMap_.end()) return false;
+    if (kind)   *kind   = (int)it->second.kind;
+    if (realId) *realId = it->second.realId;
+    subMap_.erase(it);
+    return true;
+}
+
+void Host::dropSubsOf(int owner) {
+    for (auto it = subMap_.begin(); it != subMap_.end();) {
+        if (it->second.owner == owner) it = subMap_.erase(it);
+        else ++it;
+    }
 }
 
 void Host::dropFrameSub(int chainId) {
@@ -267,17 +293,23 @@ static int api_subscribe(PP_Host* h, const char* topic, PP_EventFn fn, void* use
         a->chainId = H->chain().add(&frameSubThunk, a.get(), 100, H->owner());
         int cid = a->chainId;
         H->frameSubs().push_back(std::move(a));
-        return cid;
+        /* 返回 Host 分配的插件可见 id，而不是帧链内部 id */
+        return H->registerSub(Host::SubKind::FrameChain, cid, H->owner());
     }
-    return H->bus().subscribe(topic, fn, user, H->owner());
+    int eid = H->bus().subscribe(topic, fn, user, H->owner());
+    return H->registerSub(Host::SubKind::EventBus, eid, H->owner());
 }
 
 static void api_unsubscribe(PP_Host* h, int id) {
     Host* H = HOST(h);
-    for (const auto& a : H->frameSubs()) {
-        if (a && a->chainId == id) { H->dropFrameSub(id); return; }
+    int kind = -1, realId = -1;
+    if (!H->takeSub(id, &kind, &realId)) {
+        /* 不是本宿主分配的 id：不猜、不乱撤（早期版本会误撤到另一类订阅） */
+        PP_WARN("unsubscribe: 未知订阅句柄 #%d（已忽略）", id);
+        return;
     }
-    H->bus().unsubscribe(id);
+    if (kind == (int)Host::SubKind::FrameChain) H->dropFrameSub(realId);
+    else                                          H->bus().unsubscribe(realId);
 }
 
 static int api_publish(PP_Host* h, const char* topic, const char* json) {

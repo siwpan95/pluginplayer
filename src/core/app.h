@@ -49,6 +49,12 @@ public:
      *  插件 API、控制通道、快捷键三条路径统一走这里，避免「状态变了但听不出来」。 */
     void applyAudioParams();
 
+    /** 是否允许打开网络输入（scheme:// 或 UNC）。
+     *  默认 false：控制通道/插件能触发 openMedia，若默认放行就等于给了
+     *  一个「本机代你出网」的 SSRF 原语。需要时用 --allow-network-input 显式开启。 */
+    void setAllowNetworkInput(bool b) { allowNetworkInput_ = b; }
+    bool allowNetworkInput() const { return allowNetworkInput_; }
+
 private:
     /* 主循环分步 */
     void pollEvents();
@@ -81,6 +87,7 @@ private:
     bool               fullscreen_ = false;
     bool               showHelp_ = false;
     bool               completedFired_ = false;
+    bool               allowNetworkInput_ = false;
     int64_t            lastUploadedIndex_ = -1;
     double             lastTickEmit_ = 0.0;
     std::string        mediaPath_;

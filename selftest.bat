@@ -7,6 +7,9 @@ if not exist vendor\ffmpeg\bin\ffmpeg.exe (
   pause & exit /b 1
 )
 F:\Python314\python.exe build.py || pause
+echo [1/3] √∞—Ã≤‚ ‘£®tests/smoke_link.cpp + tests/smoke_audio.cpp£©
+F:\Python314\python.exe build.py --smoke
+if errorlevel 1 echo [WARN] √∞—Ã≤‚ ‘”– ß∞‹œÓ£¨œÍº˚…œ∑Ω ‰≥ˆ
 cd dist
 if not exist test_assets mkdir test_assets
 if not exist test_assets\sample.mp4 ..\vendor\ffmpeg\bin\ffmpeg.exe -y -hide_banner -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 -c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -shortest test_assets\sample.mp4

@@ -159,6 +159,17 @@ void RpcServer::stop() {
     }
     if (acceptTh_.joinable()) acceptTh_.join();
 
+    /* 放出所有还在等主线程执行的请求，否则 stop() 会卡在 join 上：
+     * 主循环此刻已经不会再调用 pumpMainThread 了。 */
+    {
+        std::lock_guard<std::mutex> lk(qmu_);
+        for (auto& r : queue_) {
+            r->abandoned = true;
+            r->cv.notify_all();
+        }
+        queue_.clear();
+    }
+
     /* 先摘出列表，再逐个体面关闭并 join。
      * 客户端对象由 shared_ptr 持有，join 之前不会被析构，因此不存在
      * 「主线程 delete 掉、工作线程还在用」的 use-after-free。 */
@@ -243,7 +254,14 @@ void RpcServer::clientLoop(std::shared_ptr<Client> c) {
                 scanFrom = 0;
                 if (line.empty()) continue;
                 served_++;
-                std::string resp = handleRequest(line, c);
+                /* 交主线程执行：见 pumpMainThread() 的说明。
+                 * 这样 handleRequest 里对 Player/Host 状态的全部读写都发生在
+                 * 主循环线程，不再与主循环并发。 */
+                std::string resp;
+                if (!dispatchToMainThread(line, c, &resp)) {
+                    sendLineTo(c, "{\"ok\":false,\"error\":\"主线程繁忙或正在退出，请求未执行\"}");
+                    continue;
+                }
                 if (!resp.empty()) sendLineTo(c, resp);
                 if (c->closing.load()) goto done;
             }
@@ -282,6 +300,54 @@ done:
     {
         std::lock_guard<std::mutex> lk(mu_);
         clients_.erase(std::remove(clients_.begin(), clients_.end(), c), clients_.end());
+    }
+}
+
+/* ------------------------- 主线程执行队列 ------------------------- */
+
+bool RpcServer::dispatchToMainThread(const std::string& line,
+                                     const std::shared_ptr<Client>& c,
+                                     std::string* out) {
+    auto req = std::make_shared<Pending>();
+    req->line = line;
+    req->client = c;
+    {
+        std::lock_guard<std::mutex> lk(qmu_);
+        if (!running_.load()) return false;
+        queue_.push_back(req);
+    }
+    std::unique_lock<std::mutex> lk(req->mu);
+    bool signaled = req->cv.wait_for(
+        lk, std::chrono::seconds(kRequestTimeoutSec),
+        [&] { return req->done || req->abandoned.load(); });
+    if (!signaled) {
+        /* 主线程 10 秒都没轮到（例如正卡在一次解码/打开媒体上）：
+         * 放弃这条请求，别把工作线程和客户端一起拖死。 */
+        req->abandoned = true;
+        return false;
+    }
+    if (req->abandoned.load() && !req->done) return false;
+    *out = req->response;
+    return true;
+}
+
+void RpcServer::pumpMainThread() {
+    for (;;) {
+        std::shared_ptr<Pending> req;
+        {
+            std::lock_guard<std::mutex> lk(qmu_);
+            if (queue_.empty()) return;
+            req = queue_.front();
+            queue_.pop_front();
+        }
+        if (!req || req->abandoned.load()) continue;
+        std::string resp = handleRequest(req->line, req->client);
+        {
+            std::lock_guard<std::mutex> lk(req->mu);
+            req->response = resp;
+            req->done = true;
+        }
+        req->cv.notify_all();
     }
 }
 

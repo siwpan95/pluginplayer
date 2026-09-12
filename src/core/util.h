@@ -58,6 +58,14 @@ std::vector<std::string> listDir(const std::string& dir, const std::string& extF
 std::string normalizePath(const std::string& p);
 bool pathIsInside(const std::string& child, const std::string& root);
 
+/* ---- 网络输入判定（用于默认拒绝 SSRF 型输入） ----
+ * 识别两类「会出网」的输入：
+ *   1) scheme://  —— http/https/ftp/rtsp/rtmp/smb/file/udp/tcp …（要求 scheme ≥2 字符，
+ *      这样不会把 Windows 盘符 "C://x" 误判成协议）
+ *   2) UNC 路径   —— \\host\share 或 //host/share（会触发 SMB 认证，可被用于 NTLM 中继）
+ * 注意：普通本地路径（C:\a\b.mp4、/tmp/a.mp4、相对路径）都不会命中。 */
+bool isNetworkInput(const std::string& s);
+
 /* ---- 极简 JSON 取值（够用即可，不引入第三方库） ---- */
 std::string jsonGetString(const std::string& json, const char* key, const std::string& def = "");
 double jsonGetNumber(const std::string& json, const char* key, double def = 0.0);
