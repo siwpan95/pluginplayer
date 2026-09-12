@@ -253,11 +253,11 @@ git config core.hooksPath .githooks
 `start-dsh.bat` / `ci.bat`）与 `tools/pp_cli.py:shim_text()`（`pluginplayer.cmd` / `pp.cmd`），
 两边都遵守：
 
-> `start-dsh.bat` 是唯一一件"不属于本项目的产物"：它是 deepseek-harness 的 Web UI
-> 启动器（那边同一份由 `gen_start_bat.py` 生成），放在这里只是为了让两个双击入口挨在一起。
-> **要改它的行为，先去改 `G:\notpython\deepseek-harness-master`，再同步过来** ——
-> 那份启动器踩过的两个坑（本地镜像代理的就绪竞态、腾讯电脑管家拦 junction 导致
-> WinError 448）写在那个仓库的 `DEPLOY.md` 里。
+> `start-dsh.bat` 是**本项目的启动器**（双击开播放器窗口 / 把媒体文件拖上去即播）：
+> 它转发 `run.bat`，启动逻辑只保留一份。它一度被用作 deepseek-harness 的 Web UI
+> 启动器（上游那份在 `G:\notpython\deepseek-harness-master\start-dsh.bat`；两个 dsh
+> 小工具 `tools/dsh_bind_workspace.py` / `tools/dsh_open_ui.py` 仍留在 `tools/` 里可
+> 独立使用），现已按项目所有者要求改回"启动本项目"这一职责。
 
 1. **纯 ASCII + CRLF**。cmd.exe 按当前代码页（本机 GBK）解读 `.bat`，混入中文在非中文
    代码页的机器上会乱码/截断。**`bat-ascii-crlf` 门禁 + `tests/cli_check.py` 都会拦。**

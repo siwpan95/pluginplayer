@@ -22,7 +22,9 @@ tests/                    冒烟（smoke_link / smoke_audio）、插件 API 回�
 tools/                    fetch_deps（依赖）、rpc_client（协议测试客户端）、
                           pp_cli（命令行接口）、verify（18 条机械门禁）、ci（CI 编排）、
                           gitee_release（建仓/转公开/发发行版）、
-                          gen_third_party_notices（第三方声明生成器）
+                          gen_third_party_notices（第三方声明生成器）、
+                          dsh_bind_workspace（把目录注册成 dsh 工作区）、
+                          dsh_open_ui（dsh 就绪后自动打开浏览器）
 docs/                     文档（索引在 docs/README.md）
 .workflow/                Gitee Go 流水线（只跑可移植子集，原因写在文件头）
 .githooks/pre-commit      可选本地钩子（core.hooksPath）

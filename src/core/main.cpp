@@ -121,6 +121,13 @@ static void printHelp() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    /* 控制台输出统一按 UTF-8 解读：源码与编译器的执行字符集都是 UTF-8，而 Windows
+     * 控制台默认是 GBK(936) —— 双击 .bat 启动时中文会整片乱码（"搜索" 显示成
+     * "鎼滅储"，用户实测报过）。stdout 重定向到管道/文件时该调用不影响字节流，
+     * 捕获方仍按 UTF-8 解码；无控制台（GUI 方式启动）时它只是无害地返回 FALSE。 */
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     std::string media;
     std::string outDir = "selftest_out";
     int  winW = 1280, winH = 720;

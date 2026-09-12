@@ -145,8 +145,8 @@ F:\Python314\python.exe tools\ci.py           :: 同上，直接调编排脚本�
 
 | 阶段 | 环境 | 前提 |
 |---|---|---|
-| `gates` 机械门禁（`tools/verify.py`，17 条） | 跨平台 | 无 |
-| `py-unit` Python 单元测试（95 项） | 跨平台 | 标准库 |
+| `gates` 机械门禁（`tools/verify.py`，18 条） | 跨平台 | 无 |
+| `py-unit` Python 单元测试（108 项） | 跨平台 | 标准库 |
 | `cpp-unit` C++ 单元测试（75 项） | 跨平台 | g++ / MinGW |
 | `smoke` 冒烟、`build` 构建、`selftest` 自检、`cli` CLI 回归、`release` 发布构建 | **仅 Windows** | vendor/ 或 dist/ |
 
@@ -357,17 +357,18 @@ pluginplayer/
 │     plugin_apitest/plugin.cpp        插件 API 回归测试插件（插件用，不随发布物分发）
 │     cli_check.py                     命令行接口回归（垫片契约 + 退出码 + 真跑控制通道）
 │     unit/                            ★ C++ 单元测试（75 项，零依赖的极简 harness）
-│     python/                          ★ Python 单元测试（95 项，标准库 unittest）
+│     python/                          ★ Python 单元测试（108 项，标准库 unittest）
 ├─ tools/fetch_deps.py                 依赖准备；rpc_client.py 控制通道测试客户端（带令牌）
 │     pp_cli.py                        ★ 命令行接口本体（生成 pluginplayer 命令）
 │     verify.py                        ★ 机械门禁（18 条，<1 秒，--selfcheck 证明它们拦得住）
 │     ci.py                            ★ CI 编排（分阶段，前提缺失记 SKIP 并说明原因）
 │     gitee_release.py                   Gitee 建仓 / 转公开 / 发发行版（幂等，可分步重跑）
 │     gen_third_party_notices.py        第三方组件声明生成器（依赖/许可证据有变就得重跑）
+│     dsh_bind_workspace.py             把本目录注册成 dsh 工作区（独立小工具，可选）
+│     dsh_open_ui.py                    dsh 就绪后用默认浏览器打开 Web UI（独立小工具，可选）
 ├─ pluginplayer.cmd / pp.cmd           命令垫片（纯 ASCII + CRLF，install-cli 生成）
 ├─ run.bat / selftest.bat              启动器（拖个文件上来即播）/ 一键自检（build.py 生成）
-├─ start-dsh.bat                       DeepSeek Harness Web UI 启动器（镜像自
-│                                      deepseek-harness-master，同样由 build.py 生成）
+├─ start-dsh.bat                       本项目启动器（转发 run.bat；双击开播放器 / 拖文件即播）
 ├─ ci.bat                              一键 CI（跑 tools/ci.py；与 run/selftest 同套生成方式）
 ├─ build.py                            构建脚本（不依赖 cmake/make；--smoke / --unit / --apitest）
 ├─ .gitignore                          排除构建产物、第三方依赖、运行期产物与令牌文件
@@ -626,15 +627,16 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
 [PASS] release-payload      17 个文件 / 127.0 MB，与 README 的 17 / 127 MB 一致
 [PASS] portable-modules     17 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
+[PASS] no-credentials       82 个文本文件已扫描，未发现硬编码凭据
 [PASS] arg-bounds-align     13 项边界与 C++ 源码一致
 [PASS] rpc-methods-align    实现 19 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
 [PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应
 [PASS] cli-commands-align   25 个命令，README 与 docs/CLI.md 的表与实现一致
 [PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 1；Cordis 4.0.0-rc.9
 [PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
-[PASS] doc-links            22 条相对链接全部可解析
+[PASS] doc-links            27 条相对链接全部可解析
 [PASS] docs-index           4 份文档全部收录
-[PASS] readme-tree          目录结构里 55 个条目全部存在（按 basename 核对）
+[PASS] readme-tree          目录结构里 56 个条目全部存在（按 basename 核对）
 [PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/*.yml, ci.bat）
 ```
 
@@ -668,7 +670,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 - `versions-align` 原本只判断"版本串在 README 里出现过"，而 README 在 CVE 表、变更记录里
   也会出现同一个版本号 —— 改错依赖表照样过。已收紧为"必须在依赖表那一行里"。
 
-### 12. 单元测试与 CI —— 75 + 95 项通过，本地 CI 6/6 阶段
+### 12. 单元测试与 CI —— 75 + 108 项通过，本地 CI 6/6 阶段
 
 ```bat
 F:\Python314\python.exe build.py --unit                        :: C++ 单元测试
@@ -678,7 +680,7 @@ ci.bat                                                          :: 一键跑全�
 
 ```
 ==== 单元测试: 75/75 项通过，跳过 0 项，失败 0 项 ====       ← tests/unit/（C++，零依赖 harness）
-Ran 95 tests in 1.180s
+Ran 108 tests in 0.900s
 OK                                                          ← tests/python/（标准库 unittest）
 
 ==== CI: 6/6 阶段通过，跳过 0 项，失败 0 项，用时 59.3s ====   ← ci.bat（本地全量）
@@ -696,10 +698,24 @@ OK                                                          ← tests/python/（
 | `eventbus` | 13 | EMIT/WATERFALL/SERIAL/BAIL 四种语义、短路、owner 撤销、分发中撤销自身 |
 | `registry` | 11 | 服务/命令/帧链的注册与按 owner 撤销、优先级顺序、DROP/BAIL 短路、缓冲区边界 |
 | `config` | 9 | 注释与空白、重复键、dirty 语义（写同值不置脏）、原子保存、类型解析、超长行截断 |
-| Python | 95 | CLI 参数校验与全局选项抽取、令牌解析顺序、垫片字节契约、门禁解析器、生成器口径、**缺 vendor 时必须 SKIP 而不是 FAIL** |
+| Python | 108 | CLI 参数校验与全局选项抽取、令牌解析顺序、垫片字节契约、门禁解析器、生成器口径、**缺 vendor 时必须 SKIP 而不是 FAIL**、dsh 小工具的绑定/打开逻辑 |
 
 C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个模块），
 所以"还没下依赖"的机器和 Linux 容器都能跑 —— 这是 CI 能有意义的前提。
+
+### 13. 启动器定位与中文显示（2026-09-12）
+
+- `start-dsh.bat` 是**本项目启动器**：双击打开播放器窗口，媒体文件拖上去即播；它转发
+  `run.bat`，启动与错误处理逻辑只保留一份（由 `build.py:make_launcher()` 生成）。
+- 控制台中文曾整片乱码（"搜索"显示成"鎼滅储"）：播放器输出是 UTF-8（源码与编译器的执行
+  字符集都是 UTF-8），而 Windows 控制台默认按 GBK(936) 解读。现在程序入口调用
+  `SetConsoleOutputCP(CP_UTF8)`，启动器里再加 `chcp 65001` —— 两层保证。
+
+```bat
+chcp 936                            :: 先把控制台钉到 GBK（复现条件）
+start-dsh.bat --list-plugins        :: 启动播放器
+chcp                                :: → Active code page: 65001（修复前此处仍是 936）
+```
 
 ---
 
@@ -714,7 +730,7 @@ C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个�
 | 外部控制 | 无 | JSON-RPC 控制通道 |
 | 精确 seek | 无 | 有（seek 后丢帧对齐，`dropBefore_`） |
 | 音频时钟 | 音频/视频/外部三种主时钟 | 音频优先 + **停滞自动退回墙钟** |
-| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（170 项）、`tools/verify.py` 18 条机械门禁（含自检）、`ci.bat` 一键编排 |
+| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（183 项）、`tools/verify.py` 18 条机械门禁（含自检）、`ci.bat` 一键编排 |
 | 外部控制的安全 | 无外部控制 | JSON-RPC 强制令牌认证 + 报文/并发上限；网络输入默认拒绝 |
 
 ---
