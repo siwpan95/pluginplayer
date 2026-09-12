@@ -1,6 +1,6 @@
 # PluginPlayer 播放体验增强规划（v1 草案）
 
-> 状态：**P0 已实施完毕（B1–B4d，2026-09-12）；P1/P2 未开始**
+> 状态：**P0 全部闭环（B1–B5，2026-09-12）；P1/P2 未开始**
 > 基线：`G:\local\pluginplayer` @ `af6bacc`（工作树含未提交产物目录 `_dist_baseline_backup` / `_vendor_backup_20260912`）
 > 诊断日期：2026-09-12
 > 关联约束：[AGENTS.md](AGENTS.md)（仓库规则与验证门槛）、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
@@ -469,18 +469,36 @@ README「已知限制」。
 让 A/V 一起从 0 起跑。定位过程见 README §18（两次对照实验：无音轨素材否掉了"音频时钟粒度"
 假设；3 s / 10 s 素材对照证明是固定启动成本而与时长无关）。
 
-**未做**：seek 之后没有预热（seek 后实测一次弹掉 24 帧，落点比目标晚）。
-它与 `dropBefore_`（故意丢目标前 0.1 s 以快出画）语义交织，不能照搬 open 的做法，登记为下一项。
+**未做**：~~seek 之后没有预热~~ —— **已补做（2026-09-12）**：`flushAfterSeek()` 里同样进入预热
+（时钟冻在目标点），并通过 `Player::setSeekCallback` 让宿主**暂停音频设备**、第一帧上屏时
+`stepAudioPreroll()` 一并恢复；与 `dropBefore_` 不冲突（预热只冻时钟，解码线程照常丢目标前的帧）。
+实测：4K seek 到 5.0 s → seek 响应 position 恰为 5.000；seek 后 5 s `dropped +0`（修复前 24）、
+显示 +115 帧；自检 `seek` 步骤仍 PASS。
 
-**P0-4c 真零拷贝 —— 未做**
+**P0-4c 真零拷贝 —— 评估完成，判定"当前不可行"（2026-09-12，三组 PoC 实测）**
 
 把 `ID3D11Texture2D` 直接包成 SDL 纹理（`SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER`），
-要求 FFmpeg 与 SDL **共用同一个 D3D11 设备**
-（`SDL_PROP_RENDERER_D3D11_DEVICE_POINTER` + `D3D11_BIND_SHADER_RESOURCE`）。
-这是让硬解普遍划算的唯一途径，但改动面最大、也最难在本机验证部分失败场景，
-**没有在本轮动**。SDL3 官方 `test/testffmpeg.c` 是官方参考实现。
+两条路线都实跑了：
 
-**下一步**：P0-4c 真零拷贝，以及 seek 预热（两者都还没开始）。
+| 路线 | 做法 | 实测结果 |
+|---|---|---|
+| 共用设备 | 拿 SDL 渲染器的 `ID3D11Device` 换进 FFmpeg 的 hwdevice | 解码器 execute **E_INVALIDARG**（SDL 建设备不带 `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`；`QueryInterface(ID3D11VideoDevice)` 虽返回 OK，执行时仍拒绝） |
+| 跨设备包装 | FFmpeg 自己 device 解码（surface 带 `BIND_SHADER_RESOURCE`），SDL 直接包装渲染 | 包装"成功"、首帧渲染有内容，但随后**D3D11 Device Removed**（驱动移除设备、进程崩溃）—— 跨设备建 SRV 违反 D3D11 规则，驱动级拒绝 |
+
+过程中确认的**可复用事实**：
+- FFmpeg 9.0.1 支持"surface 带 SR 绑定"：在 `AVD3D11VAFramesContext.BindFlags` 或
+  `AVD3D11VADeviceContext.BindFlags`（全局）上设 `D3D11_BIND_DECODER|D3D11_BIND_SHADER_RESOURCE`
+  即可，FFmpeg 自己分配池（**不要**走"手动预创建 texture"路线——只给 texture 不给 pool 会崩，
+  gdb 栈在 `av_hwframe_ctx_init` 内）。
+- 替换 hwdevice 的 device 时必须**同时替换 device_context**（`GetImmediateContext`），
+  只换 device 不换 context 会崩。
+- SDL3 没有 `SDL_PROP_RENDERER_CREATE_D3D11_DEVICE_POINTER`（外部设备建渲染器入口不存在）。
+
+**可行替代（未来）**：① 渲染层整体换 SDL_gpu API（`SDL_CreateGPUDeviceWithProperties`
+支持外部 D3D11 设备）；② 等 SDL 增加外部 D3D11 device 入口；③ 原生 D3D11 渲染器（脱离 SDL
+渲染器，改动面最大）。三者的共同前提是"解码与渲染共用一个带 VIDEO_SUPPORT 的设备"。
+当前 NV12 半零拷贝路径已让 4K30 贴解码速率、丢帧 0（§P0-4b），真零拷贝的边际收益有限，
+**判定：不做，记录在案**。
 
 **验收口径的修正（重要，2026-09-12 二次修正）**
 

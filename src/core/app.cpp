@@ -146,6 +146,15 @@ bool App::openAudio() {
     player_.setAudioFlushCallback([this]() {
         if (audioStream_) SDL_ClearAudioStream(audioStream_);
     });
+    /* seek 后预热：Player 已把 prerollPending_ 置位、主时钟冻在目标点。
+     * 这里把音频设备暂停 —— 否则音频立刻按实时速率往前走，预热结束时音频时钟
+     * 已经跑掉一秒多，视频第一帧（pts≈目标）反而"迟到"。等第一帧上屏，
+     * stepAudioPreroll() 会 resume（与 open 预热共用同一条路）。 */
+    player_.setSeekCallback([this]() {
+        if (!player_.prerollPending()) return;
+        audioAwaitPreroll_ = true;
+        if (audioStream_) SDL_PauseAudioStreamDevice(audioStream_);
+    });
     player_.setAudioActive(true);
     applyAudioParams();
     /* 预热：解码器还没吐出第一帧时**先不启动音频设备**。
@@ -170,6 +179,7 @@ void App::closeAudio() {
     }
     player_.setAudioActive(false);
     player_.setAudioFlushCallback(nullptr);
+    player_.setSeekCallback(nullptr);
 }
 
 void App::stepAudioPreroll() {

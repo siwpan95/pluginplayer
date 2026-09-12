@@ -115,7 +115,10 @@ av_hwdevice_ctx_create(D3D11VA) → vCtx_->hw_device_ctx = av_buffer_ref(...)
   的启动推迟到那一刻，让 A/V 一起从 0 起跑。不这样做的话，解码器冷启动的 ~0.2 s 里主时钟
   已经跑掉了，解出来的头几帧一进队列就"迟到"，被上面那条规则整批弹掉
   （实测固定丢 6 帧，与素材长短无关）。兜底：预热超 2 s 自动放开并记 WARN。
-  **seek 之后没有预热**（语义与 `dropBefore_` 交织），是已知限制。
+  **seek 后同样预热**：`flushAfterSeek()` 把时钟冻在目标点、宿主暂停音频设备
+  （`setSeekCallback`），第一帧上屏后恢复 —— 修掉"seek 后整批丢帧"
+  （4K 实测一次弹丢 24 帧 → 0）。与 `dropBefore_` 不冲突（预热只冻时钟，
+  解码线程照常丢目标前的帧）。
 - **暂停/变速**：暂停时墙钟冻结、音频回调直接返回（自然静音）；
   变速用 `SDL_SetAudioStreamFrequencyRatio(stream, speed)` 做重采样，视频看主时钟。
 

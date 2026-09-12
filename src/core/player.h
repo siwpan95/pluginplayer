@@ -194,6 +194,9 @@ public:
     /** 音频回调每从环形缓冲取走 n 字节就调用一次，用于推进音频时钟。 */
     void  addConsumedAudioBytes(int64_t n) { audioConsumedBytes_ += n; }
     void  setAudioFlushCallback(std::function<void()> cb) { onAudioFlush_ = std::move(cb); }
+    /** seek 完成后回调（此时 prerollPending_ 已置位）：
+     *  宿主用它把音频设备暂停、等第一帧上屏再恢复（A/V 对齐，同 open 预热）。 */
+    void  setSeekCallback(std::function<void()> cb) { onSeek_ = std::move(cb); }
     /** 归一化到 [-1,1] 的最近音频快照（供频谱插件使用）。 */
     int   snapshotAudio(float* dst, int maxSamples) const;
 
@@ -288,6 +291,10 @@ private:
     /* 预热：第一帧上屏前冻结主时钟（见 prerollPending()）。 */
     std::atomic<bool> prerollPending_{false};
     double   prerollTick_ = 0.0;
+    /* 最近一次解码出帧的时刻（毫秒）。预热超时兜底用它判"真卡死"：
+     * 时钟冻住 ≠ 卡死 —— seek 后从关键帧追赶解码可能持续数秒（4K x264 关键帧
+     * 间隔可长达 8 s），期间必须继续冻结。只有"2 秒连一帧都没产出"才放开。 */
+    std::atomic<int64_t> lastDecodeTickMs_{0};
     double   prevPumpTick_ = 0.0;   /* 上次 pumpFrame 的时刻，用于诊断成批丢帧 */
     double   lastDropLogTick_ = 0.0;/* 丢帧日志限流（1 条/秒） */
     int      bytesPerSec_ = 0;
@@ -307,6 +314,7 @@ private:
      *  这一步把画面/声音真正推进到用户指定的时间点（mpv --hr-seek 的做法）。 */
     std::atomic<double> dropBefore_{0.0};
     std::function<void()> onAudioFlush_;
+    std::function<void()> onSeek_;
 
     /* --- 统计 --- */
     mutable std::mutex statMu_;

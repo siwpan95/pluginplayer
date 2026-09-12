@@ -237,6 +237,7 @@ bool Player::open(const std::string& path) {
     /* 进入预热：解码器冷启动期间主时钟必须冻在 0，否则开头几帧一解出来就已经"迟到"。
      * 无视频轨时不必预热（没有帧可等）。 */
     prerollTick_ = extLastTick_;
+    lastDecodeTickMs_ = (int64_t)SDL_GetTicks();
     prerollPending_ = (vStream_ >= 0);
     paused_ = false;
     eof_ = false;
@@ -605,6 +606,16 @@ void Player::flushAfterSeek(double target) {
     audioLeadBytes_ = 0;
     extPts_ = target;
     extLastTick_ = (double)SDL_GetTicks() / 1000.0;
+    /* seek 后进入预热：目标处要重新解码（4K 硬解实测 ~1.2 s 才出第一帧），
+     * 这期间主时钟若照走，解出来的帧全部落后时钟一秒多、被 pumpFrame 整批弹掉
+     * （实测一次弹掉 24 帧，落点比目标晚 ~2 s）。与 open() 的预热同一机制，
+     * 基准点是 seek 目标：时钟冻在 target，第一帧一到（pts≈target−0.1s，已被
+     * dropBefore_ 放过）立即上屏，落点就是目标本身。
+     * 先置位再回调 —— 宿主在回调里要按 prerollPending_ 决定是否暂停音频设备。 */
+    prerollTick_ = extLastTick_;
+    lastDecodeTickMs_ = (int64_t)SDL_GetTicks();
+    prerollPending_ = (vStream_ >= 0);
+    if (onSeek_) onSeek_();
 }
 
 /* ---------------- 视频解码 ---------------- */
@@ -782,6 +793,9 @@ void Player::videoDecodeLoop() {
                     if (serial != vq_.serial()) return false;   /* flush 作废 */
                     vframes_.push_back(vf);
                 }
+                /* 刷新"最近出帧"时刻：预热超时兜底据此区分
+                 * "解码器在追赶（冻时钟）"与"解码器真卡死（放开时钟）"。 */
+                lastDecodeTickMs_ = (int64_t)SDL_GetTicks();
                 {
                     std::lock_guard<std::mutex> lk(statMu_);
                     decodedFrames_++;
@@ -999,10 +1013,12 @@ double Player::masterClock() {
      * 只在冷启动用（open()），seek 不走这条路 —— seek 的"快出画"靠的是
      * flushAfterSeek 里的 dropBefore_，语义不同，不能混。 */
     if (prerollPending_.load()) {
-        if (now - prerollTick_ > 2.0) {
-            /* 兜底：2 秒还没出帧（视频轨损坏/解码器卡死），不能让时钟一直冻着，
-             * 否则整个播放看起来像卡住。放开并记一条警告。 */
-            PP_WARN("预热超时（第一帧 2 秒未到），放开主时钟");
+        int64_t nowMs = (int64_t)SDL_GetTicks();
+        /* 兜底要判"解码器真卡死"而不是"冻得太久"：seek 后从关键帧追赶解码
+         * 可能持续数秒（4K 关键帧间隔可达 8 s），期间时钟必须继续冻着。
+         * 只有"连续 2 秒连一帧都没产出"才放开（坏码流/解码器崩溃）。 */
+        if (nowMs - lastDecodeTickMs_.load() > 2000) {
+            PP_WARN("预热超时（2 秒无新帧产出），放开主时钟");
             prerollPending_ = false;
         } else {
             extLastTick_ = now;
