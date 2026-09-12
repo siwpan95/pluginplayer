@@ -636,10 +636,16 @@ void Player::audioDecodeLoop() {
             AVChannelLayout outLayout{};
             av_channel_layout_default(&outLayout, outChannels_);
 
+            /* 输入采样率可能是 0（畸形文件 / 部分编码器）。建 swr 时做了保护，
+             * 但下面的 swr_get_delay(swr_, 0) 与 av_rescale_rnd(..., 0, ...)
+             * 会**除零**。这里统一取一个有效值，三处保持一致。 */
+            const int inRate = fr->sample_rate > 0 ? fr->sample_rate : outSampleRate_;
+            if (inRate <= 0) { av_frame_unref(fr); continue; }
+
             if (!swr_) {
                 if (swr_alloc_set_opts2(&swr_, &outLayout, AV_SAMPLE_FMT_S16, outSampleRate_,
                                         &inLayout, (AVSampleFormat)fr->format,
-                                        fr->sample_rate ? fr->sample_rate : outSampleRate_,
+                                        inRate,
                                         0, nullptr) < 0 || swr_init(swr_) < 0) {
                     PP_ERROR("swr 初始化失败");
                     swr_free(&swr_);
@@ -650,8 +656,8 @@ void Player::audioDecodeLoop() {
                 }
             }
 
-            int maxOut = (int)av_rescale_rnd(swr_get_delay(swr_, fr->sample_rate) + fr->nb_samples,
-                                             outSampleRate_, fr->sample_rate, AV_ROUND_UP) + 64;
+            int maxOut = (int)av_rescale_rnd(swr_get_delay(swr_, inRate) + fr->nb_samples,
+                                             outSampleRate_, inRate, AV_ROUND_UP) + 64;
             size_t need = (size_t)maxOut * outChannels_ * 2;
             if (outBuf.size() < need) outBuf.resize(need);
 

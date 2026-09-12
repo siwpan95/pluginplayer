@@ -51,6 +51,15 @@ public:
     void setOwner(int owner) { owner_ = owner; }
     int  owner() const { return owner_; }
 
+    /* --- 插件名（用于配置键） ---
+     * 槽位号是按 DLL 字母序分配的，增删插件会让 plugin.<槽位>.<键> 整体错位。
+     * 因此配置键改用插件名：plugin.<插件名>.<键>（插件名来自 PP_Plugin.name，
+     * 非 [a-z0-9_-] 字符替换为下划线）。首次访问新键时会自动把旧槽位键的值迁过来。 */
+    void setOwnerName(int owner, const std::string& name) { ownerNames_[owner] = name; }
+    std::string ownerName(int owner) const;
+    /** 把 "键" 解析成实际使用的配置键（含旧键迁移）。 */
+    std::string pluginConfigKey(int owner, const std::string& key);
+
     /** 调用插件回调时自动切换 owner 的守卫。 */
     struct OwnerScope {
         Host* h;
@@ -132,6 +141,7 @@ private:
     App*    app_ = nullptr;
     Player* player_ = nullptr;
     int     owner_ = 0;
+    std::map<int, std::string> ownerNames_;   /* 槽位 -> 插件名 */
 
     EventBus        bus_;
     ServiceRegistry services_;

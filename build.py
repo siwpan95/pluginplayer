@@ -235,16 +235,30 @@ def package():
         if os.path.isfile(pth):
             cp(pth, DIST)
 
-    # 默认配置
+    # 默认配置。只有文件不存在时才生成 —— 不覆盖用户已有的设置。
     cfg = os.path.join(DIST, "config", "pluginplayer.ini")
     if not os.path.isfile(cfg):
         with open(cfg, "w", encoding="utf-8") as f:
-            f.write("# PluginPlayer 配置（自动生成，可手工编辑）\n"
-                    "# 插件私有配置统一使用 plugin.<槽位号>.<键> 前缀\n\n"
-                    "plugin.1.count=0\n"
-                    "plugin.1.stamp=0\n"
-                    "plugin.3.mode=1\n"
-                    "plugin.5.enabled=1\n")
+            f.write(
+                "# PluginPlayer 配置（自动生成，可手工编辑）\n"
+                "#\n"
+                "# 【插件私有配置】由宿主自动写入/读取，键名格式：\n"
+                "#     plugin.<插件名>.<键>\n"
+                "#   例如 plugin.snapshot.count、plugin.video_effects.mode。\n"
+                "#   插件名取 PP_Plugin.name（小写；非 [a-z0-9_-] 的字符替换成下划线）。\n"
+                "#\n"
+                "#   历史说明：早期版本用的是 plugin.<槽位号>.<键>，而槽位号按 DLL 名字母序\n"
+                "#   分配，增删插件会让所有配置整体错位。改成按插件名后，首次访问某个键时\n"
+                "#   会自动从旧的槽位键迁移过来（日志里会打印「配置迁移: ...」）。\n"
+                "#\n"
+                "# 【安全相关】\n"
+                "#   security.write_dirs  追加「插件可写目录」，分号分隔\n"
+                "#                        默认只允许 exeDir（即 dist/），例：\n"
+                "#                        security.write_dirs=D:/captures;E:/shots\n"
+                "#\n"
+                "# 注意：控制通道令牌不在本文件里，它由播放器每次启动随机生成，\n"
+                "#       写在同目录的 rpc-token.txt。\n"
+            )
     return True
 
 

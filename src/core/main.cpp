@@ -37,6 +37,13 @@
 #include "app.h"
 #include "util.h"
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
+
 using namespace pp;
 
 /* 窗口尺寸硬边界与帧数上限：与 app.h 的 kMinWindowSize/kMaxWindowSize 共用同一来源，
@@ -226,6 +233,30 @@ int main(int argc, char** argv) {
     std::string base = exeDir();
     makeDirs(pathJoin(base, "logs"));
     Log::init(pathJoin(pathJoin(base, "logs"), "pluginplayer.log"), (LogLevel)logLevel);
+
+#ifdef _WIN32
+    /* 加固 DLL 搜索路径：把「当前工作目录」从默认搜索顺序里去掉，
+     * 否则在 CWD 放一个同名 DLL 就可能被优先加载（DLL 劫持）。
+     * 必须在加载任何插件之前调用；进程启动时由导入表加载的
+     * SDL3 / FFmpeg DLL 不受影响。
+     * 用 GetProcAddress 动态取：老系统（无 KB2533623）没有这个函数，跳过并告警。 */
+    {
+        HMODULE k32 = ::GetModuleHandleA("kernel32.dll");
+        typedef BOOL (WINAPI *SetDefaultDllDirsFn)(DWORD);
+        SetDefaultDllDirsFn fn = k32
+            ? reinterpret_cast<SetDefaultDllDirsFn>(
+                  ::GetProcAddress(k32, "SetDefaultDllDirectories"))
+            : nullptr;
+        if (!fn) {
+            PP_WARN("本机不支持 SetDefaultDllDirectories，DLL 搜索路径未加固（建议升级系统）");
+        } else if (!fn(0x00001000u /* LOAD_LIBRARY_SEARCH_DEFAULT_DIRS */)) {
+            PP_WARN("SetDefaultDllDirectories 失败（err=%lu），DLL 搜索路径未加固",
+                    (unsigned long)::GetLastError());
+        } else {
+            PP_INFO("DLL 搜索路径已加固：CWD 不再参与 DLL 解析");
+        }
+    }
+#endif
 
     App app;
     if (!app.init(winW, winH, hidden || listPlugins || selfTest, !noAudio)) {

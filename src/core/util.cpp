@@ -45,6 +45,19 @@ std::string Log::levelName(LogLevel lv) {
     return "?????";
 }
 
+/* 日志是「一行一条」。如果正文里带未净化的换行，任何可控输入
+ * （例如播放器打开的文件路径含 \n）就能伪造出额外的日志行 —— 即日志注入。
+ * 这里把 \r\n 转义成字面量 \\r \\n。 */
+static std::string sanitizeLogBody(const char* s) {
+    std::string o;
+    for (const char* p = s; p && *p; ++p) {
+        if (*p == '\n')      o += "\\n";
+        else if (*p == '\r') o += "\\r";
+        else                 o.push_back(*p);
+    }
+    return o;
+}
+
 void Log::write(LogLevel lv, const char* fmt, ...) {
     if (lv < level_) return;
     char body[4096];
@@ -60,9 +73,11 @@ void Log::write(LogLevel lv, const char* fmt, ...) {
 #else
     localtime_r(&t, &tmv);
 #endif
-    char line[4400];
+    /* 转义后最长 2 倍，缓冲相应放大 */
+    std::string safe = sanitizeLogBody(body);
+    char line[8400];
     snprintf(line, sizeof(line), "[%02d:%02d:%02d][%s] %s\n",
-             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, levelName(lv).c_str(), body);
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, levelName(lv).c_str(), safe.c_str());
 
     fputs(line, lv >= L_WARN ? stderr : stdout);
     fflush(lv >= L_WARN ? stderr : stdout);

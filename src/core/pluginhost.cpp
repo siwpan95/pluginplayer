@@ -85,6 +85,9 @@ bool PluginHost::loadOne(Host* host, PluginSlot& s) {
     s.author = s.entry->author ? s.entry->author : "-";
     s.description = s.entry->description ? s.entry->description : "-";
 
+    /* 告诉宿主这个槽位叫什么 —— on_load 里的 config_get 就要按名字取键了 */
+    host->setOwnerName(s.slot, s.name);
+
     if (s.entry->on_load) {
         Host::OwnerScope scope(host, s.slot);
         int r = s.entry->on_load(host->handle(), host->api());

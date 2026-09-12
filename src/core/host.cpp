@@ -84,6 +84,37 @@ int Host::revokeAll(int owner) {
     return n;
 }
 
+/* ---- 插件配置键：按插件名而不是槽位号 ---- */
+
+std::string Host::ownerName(int owner) const {
+    auto it = ownerNames_.find(owner);
+    if (it != ownerNames_.end() && !it->second.empty()) return it->second;
+    return format("#%d", owner);
+}
+
+static std::string sanitizeKeyPart(const std::string& s) {
+    std::string o;
+    for (char c : lower(s)) {
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-') o.push_back(c);
+        else                  o.push_back('_');
+    }
+    if (o.empty() || o == "_") o = "anon";
+    return o;
+}
+
+std::string Host::pluginConfigKey(int owner, const std::string& key) {
+    std::string nameKey = format("plugin.%s.%s", sanitizeKeyPart(ownerName(owner)).c_str(),
+                                 key.c_str());
+    std::string slotKey = format("plugin.%d.%s", owner, key.c_str());
+    /* 旧版本按槽位号存。首次访问新键时把旧值迁过来，避免升级后配置"丢失"。 */
+    if (!config_.has(nameKey) && config_.has(slotKey)) {
+        config_.set(nameKey, config_.get(slotKey, ""));
+        PP_INFO("配置迁移: %s -> %s", slotKey.c_str(), nameKey.c_str());
+    }
+    return nameKey;
+}
+
 /* ---- 插件可见订阅句柄：隔离 FrameChain 与 EventBus 的 id 空间 ---- */
 
 int Host::registerSub(SubKind kind, int realId, int owner) {
@@ -408,14 +439,14 @@ static const PP_OsdApi* api_osd() { return Osd::cApi(); }
 static const char* api_config_get(PP_Host* h, const char* key, const char* def) {
     Host* H = HOST(h);
     if (!key) return def;
-    std::string k = format("plugin.%d.%s", H->owner(), key);
+    std::string k = H->pluginConfigKey(H->owner(), key);
     std::string v = H->config().get(k, def ? def : "");
     return H->cacheConfig(k, v);
 }
 static int api_config_set(PP_Host* h, const char* key, const char* value) {
     Host* H = HOST(h);
     if (!key) return -1;
-    H->config().set(format("plugin.%d.%s", H->owner(), key), value ? value : "");
+    H->config().set(H->pluginConfigKey(H->owner(), key), value ? value : "");
     return 0;
 }
 
