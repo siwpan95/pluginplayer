@@ -59,7 +59,11 @@ private:
     /* 主循环分步 */
     void pollEvents();
     void handleKey(const SDL_Event& e);
-    void pumpAndUpload();
+    /** 取当前帧 → 跑帧处理链 → 上传到纹理。返回**是否真的上传成功**。
+     *  force=true 跳过"同一帧不重复上传"的去重，供自检抓屏使用（那时的当前帧
+     *  可能已经被别人"看过"、但屏幕上一次都没画过）。调用方必须保证同一帧
+     *  只 force 一次，否则帧处理链会被跑两遍。 */
+    bool pumpAndUpload(bool force = false);
     void renderFrame();
     void renderBuiltinOverlay();       /* 帮助/提示层（核心自带） */
     void stepAudioLead();
@@ -91,6 +95,12 @@ private:
     bool               allowNetworkInput_ = false;
     int64_t            lastUploadedIndex_ = -1;
     double             lastTickEmit_ = 0.0;
+    /* 最近一次 renderFrame 算出的画面矩形（letterbox 之后的位置与尺寸），
+     * 以及"这一轮到底有没有画面"。自检抓屏取证靠它把该是画面的区域圈出来，
+     * 否则只能对整窗统计，会被 OSD 的占比淹掉。 */
+    float              videoRectX_ = 0.0f, videoRectY_ = 0.0f;
+    float              videoRectW_ = 0.0f, videoRectH_ = 0.0f;
+    bool               videoRectValid_ = false;
     std::string        mediaPath_;
     std::string        lastError_;
 

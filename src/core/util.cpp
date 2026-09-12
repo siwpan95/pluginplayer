@@ -736,4 +736,32 @@ bool writePngGray8(const std::string& path, const uint8_t* gray, int w, int h, i
     return writePngImpl(path, gray, w, h, pitch, 1);
 }
 
+/* ======================= 抓屏取证 ======================= */
+
+double rgbaColorRatioInRect(const uint8_t* rgba, int pitch, int w, int h,
+                            int x, int y, int rw, int rh,
+                            uint8_t r, uint8_t g, uint8_t b) {
+    /* pitch 配错要大声失败，不能猜：按错的 pitch 走会读到相邻行之外，
+     * 统计出一个"看着合理"的假数字（与 writePngImpl 的检查同一口径）。 */
+    if (!rgba || w <= 0 || h <= 0 || pitch < w * 4) return -1.0;
+    if (rw <= 0 || rh <= 0) return -1.0;
+
+    /* 裁到图像内；完全落在外面就等于没量到 */
+    if (x < 0) { rw += x; x = 0; }
+    if (y < 0) { rh += y; y = 0; }
+    if (x >= w || y >= h) return -1.0;
+    if (x + rw > w) rw = w - x;
+    if (y + rh > h) rh = h - y;
+    if (rw <= 0 || rh <= 0) return -1.0;
+
+    size_t hit = 0;
+    for (int yy = 0; yy < rh; ++yy) {
+        const uint8_t* row = rgba + (size_t)(y + yy) * (size_t)pitch + (size_t)x * 4;
+        for (int xx = 0; xx < rw; ++xx, row += 4) {
+            if (row[0] == r && row[1] == g && row[2] == b) ++hit;
+        }
+    }
+    return (double)hit / ((double)rw * (double)rh);
+}
+
 } // namespace pp

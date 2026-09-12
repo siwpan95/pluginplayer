@@ -232,6 +232,14 @@ bool Player::open(const std::string& path) {
     seekReq_ = false;
     serial_ = 0;
     frameIndex_ = 0;
+    /* 跨媒体状态必须逐个复位。这几个是"上一部片子留下的脏值"，漏掉哪一个都会
+     * 让第二次 open 出问题；其中 demuxFinished_/drainSent_ 曾经就是漏的 ——
+     * 于是 demux 线程开新片时直接卡在"已完成"分支一个包都不读，
+     * 同时 finished() 当场为真把主时钟冻在 0 → 永久黑屏 + 立刻打"播放结束"。 */
+    demuxFinished_ = false;
+    drainSent_ = false;
+    vDrained_ = false;
+    aDrained_ = false;
     {
         std::lock_guard<std::mutex> lk(statMu_);
         decodedFrames_ = displayedFrames_ = droppedFrames_ = 0;
@@ -457,6 +465,12 @@ void Player::demuxLoop() {
 bool Player::finished() const {
     if (!opened_) return false;
     if (!demuxFinished_.load()) return false;
+    /* 解码器必须真的排空。只看"队列此刻为空"是不够的 —— 那会把两种情况误判成
+     * "播放结束"：① 刚 open、解码线程还没喂上第一批数据；② 主线程恰好把帧取空。
+     * 误判的代价是主时钟当场冻结（position 永远停在 0），并且立刻对外发
+     * media.eof / player.completed，于是插件（例如自动续播）会以为片子放完了。 */
+    if (vStream_ >= 0 && !vDrained_.load()) return false;
+    if (aStream_ >= 0 && !aDrained_.load()) return false;
     if (vq_.count() > 0 || aq_.count() > 0) return false;
     {
         std::lock_guard<std::mutex> lk(vfMu_);
@@ -487,6 +501,10 @@ void Player::flushAfterSeek(double target) {
 
     serial_ = serial_.load() + 1;
     eof_ = false;
+    /* seek 之后解码器被 flush，排空状态不再成立，必须重新等待新的 drain 包；
+     * demux 线程随后会把 demuxFinished_/drainSent_ 也置回 false（见 demuxLoop）。 */
+    vDrained_ = false;
+    aDrained_ = false;
     nextAudioPts_ = target;
     dropBefore_ = target > 0.10 ? target - 0.10 : 0.0;
     {
@@ -615,6 +633,9 @@ void Player::videoDecodeLoop() {
         if (sret < 0 && sret != AVERROR(EAGAIN) && sret != AVERROR_EOF)
             PP_DEBUG("avcodec_send_packet 返回 %d（本包被丢弃）", sret);
         if (!drainDecoder()) continue;
+        /* drain 包处理到这里 = 解码器再没有帧可吐（receive_frame 已返回 EOF）。
+         * 这是 finished() 判定"真的放完了"的必要条件之一（见 player.h）。 */
+        if (isDrain) vDrained_ = true;
     }
     av_frame_free(&fr);
     av_packet_free(&pkt);
@@ -649,7 +670,8 @@ void Player::audioDecodeLoop() {
             if (swr_) swr_init(swr_);
             lastQSerial = serial;
         }
-        if (pkt->data == nullptr) {
+        const bool isDrain = (pkt->data == nullptr);
+        if (isDrain) {
             avcodec_send_packet(aCtx_, nullptr);
         } else {
             int sret = avcodec_send_packet(aCtx_, pkt);
@@ -660,7 +682,11 @@ void Player::audioDecodeLoop() {
         for (;;) {
             int rret = avcodec_receive_frame(aCtx_, fr);
             if (rret == AVERROR(EAGAIN)) break;
-            if (rret == AVERROR_EOF) break;
+            if (rret == AVERROR_EOF) {
+                /* drain 包处理完 = 解码器再吐不出帧；音频侧排空（见 finished()） */
+                if (isDrain) aDrained_ = true;
+                break;
+            }
             if (rret < 0) break;
 
             /* 同视频：seek 后作废在途旧包，避免把旧时间戳当成新基准 */

@@ -91,4 +91,19 @@ bool sha256FileHex(const std::string& path, std::string* outHexLower);
 bool writePngRGBA(const std::string& path, const uint8_t* rgba, int w, int h, int pitch);
 bool writePngGray8(const std::string& path, const uint8_t* gray, int w, int h, int pitch);
 
+/* ---- 抓屏取证：矩形内"恰好等于指定颜色"的像素占比 ----
+ * 参数非法（空指针 / 尺寸非正 / pitch < w*4 / 矩形容不下任何像素）时返回 **-1.0**，
+ * 调用方据此区分"占比为 0"与"压根没量到"；否则返回 0..1。
+ * rgba 按 R,G,B,A 字节序（与 writePngRGBA 一致），矩形会被裁剪到图像范围内。
+ *
+ * 为什么需要它：自检要判断抓屏图里**到底有没有画面**。窗口清屏色是一个
+ * **特定**的 RGB 值，而视频纹理若没被绘制，画面矩形内就会整片是清屏色
+ * （本机实测 86.6%，其余是 OSD）；真实视频内容哪怕是一整帧 YUV 有限范围的黑场，
+ * 转成 RGBA 也是 (0,0,0) 附近，不会"恰好"等于清屏色。
+ * 于是"该占比异常高"就是"画面没画上去"的可靠特征 —— 而"图里是黑的"
+ * 本身说明不了任何问题（黑场是合法内容）。 */
+double rgbaColorRatioInRect(const uint8_t* rgba, int pitch, int w, int h,
+                            int x, int y, int rw, int rh,
+                            uint8_t r, uint8_t g, uint8_t b);
+
 } // namespace pp

@@ -131,7 +131,9 @@ public:
     double audioClockValue() const;
     double videoClockValue();
     bool   eof() const { return eof_.load(); }
-    /** 播放结束：demux 读完 + 包队列、帧队列与音频缓冲都已排空。 */
+    /** 播放结束：demux 读完 **且解码器已排空**（收到 drain 包后再吐不出帧），
+     *  并且包队列、帧队列与音频缓冲都已排空。
+     *  四个条件缺一不可 —— 少了"解码器排空"就会在刚 open 时误判为已结束。 */
     bool   finished() const;
     bool   hasAudio() const { return aStream_ >= 0; }
     bool   hasVideo() const { return vStream_ >= 0; }
@@ -205,8 +207,15 @@ private:
 
     std::thread demuxTh_, vdecTh_, adecTh_;
     std::atomic<bool> abort_{false};
+    /** demux 线程已读到文件末尾并把 drain 空包投进队列。**注意它只说明"读完了"**，
+     *  不代表解码线程已经把帧吐干净 —— 判断播放结束必须再等 *_Drained_。 */
     std::atomic<bool> demuxFinished_{false};
     bool              drainSent_ = false;
+    /** 解码线程已收到 drain 空包且解码器再也吐不出帧（receive_frame 返回 EOF）。
+     *  与 demuxFinished_ 一起才能构成"播放真的结束了"。
+     *  只在两处置真：处理完 drain 包之后；只在两处置假：open() 与 flushAfterSeek()。 */
+    std::atomic<bool> vDrained_{false};
+    std::atomic<bool> aDrained_{false};
 
     /* --- seek --- */
     mutable std::mutex seekMu_;

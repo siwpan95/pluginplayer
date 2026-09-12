@@ -148,7 +148,7 @@ F:\Python314\python.exe tools\ci.py           :: 同上，直接调编排脚本�
 |---|---|---|
 | `gates` 机械门禁（`tools/verify.py`，18 条） | 跨平台 | 无 |
 | `py-unit` Python 单元测试（108 项） | 跨平台 | 标准库 |
-| `cpp-unit` C++ 单元测试（75 项） | 跨平台 | g++ / MinGW |
+| `cpp-unit` C++ 单元测试（83 项） | 跨平台 | g++ / MinGW |
 | `smoke` 冒烟、`build` 构建、`selftest` 自检、`cli` CLI 回归、`release` 发布构建 | **仅 Windows** | vendor/ 或 dist/ |
 
 ### 为什么 CI 只有一半是跨平台的
@@ -357,7 +357,7 @@ pluginplayer/
 │     smoke_audio.cpp                  音频子系统冒烟（判定环境问题还是代码问题）
 │     plugin_apitest/plugin.cpp        插件 API 回归测试插件（插件用，不随发布物分发）
 │     cli_check.py                     命令行接口回归（垫片契约 + 退出码 + 真跑控制通道）
-│     unit/                            ★ C++ 单元测试（75 项，零依赖的极简 harness）
+│     unit/                            ★ C++ 单元测试（83 项，零依赖的极简 harness）
 │     python/                          ★ Python 单元测试（108 项，标准库 unittest）
 ├─ tools/fetch_deps.py                 依赖准备；rpc_client.py 控制通道测试客户端（带令牌）
 │     pp_cli.py                        ★ 命令行接口本体（生成 pluginplayer 命令）
@@ -438,23 +438,43 @@ pluginplayer/
 [PASS] commands_registered   — 命令 15 个
 [PASS] open_media            — mp4 1280x720 30.00 fps dur=8.00 s codec=h264/aac
 [PASS] decode_and_display    — 显示 90 帧（目标 90，可接受下限 89；媒体约 240 帧可用），被插件丢弃 0 帧
-[PASS] seek                  — 目标 4.80 s，seek 后位置 5.01 s，新显示 5 帧 (上一帧 index=93)
+[PASS] seek                  — 目标 4.80 s，seek 后位置 5.05 s，新显示 5 帧 (上一帧 index=121)
 [PASS] plugin_commands       — snapshot -> 0  stats -> 0  effect.toggle gray -> 0
-[PASS] render_and_capture    — 渲染帧已抓屏保存: ...render_output.bmp (1280x720)
+[PASS] render_and_capture    — 渲染帧已抓屏保存: ...render_output.bmp (1280x720)；画面矩形 1280x720@(0,0) 内清屏色占比 0.00%（上限 80%）
 [PASS] plugin_hot_reload     — 重载后 订阅 4->4, 命令 15->15, 服务 2->2, 帧处理器 2->2（无泄漏）
-==== 自检结束: 10/10 项通过，跳过 0 项，用时 3.89 s ====
+[PASS] reopen_media          — 二次打开后解码并显示 10 帧（目标 10，可接受下限 9），被插件丢弃 0 帧
+==== 自检结束: 11/11 项通过，跳过 0 项，用时 4.51 s ====
 ```
 
 产物：`dist/selftest_out/` 下的 `selftest_report.json`、`frame_00{1,2,3}.png`
 （解码出的原始帧）、`snapshot_0001.png`（**插件**经 `acquire_frame` + 宿主 PNG 写出保存）、
-`render_output.bmp`（SDL 渲染抓屏）。
+`render_output.bmp`（SDL 渲染抓屏）。其中 `render_output.bmp` **确实包含画面**，
+并被 `render_and_capture` 一项断言把住 —— 可以当真证据看。
 
 **自检的可信度**（这几条是刻意加严的，报告里都能看到）：
 - `decode_and_display` 的目标是 `min(--frames, 媒体实际可用帧数)`，下限再减 1
   以容忍 EOF 边界丢掉的最后一帧 —— 而不是"显示 5 帧就算过"。
 - 不适用的检查记为 `"skipped": true` 并**不计入通过数**（例如 0.5 秒的短媒体
-  会跳过 seek 校验，报告里写 `9/9 项通过，跳过 1 项`，而不是把跳过当通过）。
+  会跳过 seek 校验，报告里写 `10/10 项通过，跳过 1 项`，而不是把跳过当通过）。
 - `plugin_hot_reload` 会断言**订阅/命令/服务/帧处理器数量完全不变**，泄漏即失败。
+- `render_and_capture` 断言**抓屏图里真的有画面**，而不是"SDL 没报错就算过"：
+  抓屏成功 + 帧确实上传成功 + 画面矩形内「恰好等于清屏色」的像素占比低于 80%。
+  这条是 2026-09-12 补的 —— 在此之前它只断言 `surf != nullptr`，而实测那张"证据图"
+  里 **86.60% 的像素恰好是清屏色、纯黑 0.00%**，也就是说画面压根没被画进去，
+  它却一直是绿的（根因与修法见 `src/core/app.cpp` 中 `pumpAndUpload()` 的注释：
+  自检的 seek 步骤抢先改写了 `lastUploadedIndex_`，导致抓屏前那一次上传被去重跳过）。
+  修好后同一指标降到 **0.39% / 0.00%**。判据为什么是清屏色而不是"是不是黑的"：
+  黑场是合法内容（YUV 有限范围黑场转出来是 `(0,0,0)` 附近），而清屏色
+  `RGB(16,16,20)` 是一个**特定**值，整片都是它只能说明纹理没画上去。
+- `plugin_commands` 同时断言**每条命令的返回码**（约定 0 = 成功），失败时给出可操作提示。
+  以前只统计"调用了几条命令"，于是 `snapshot -> -1`（写文件被白名单拒）也照样 PASS。
+- `reopen_media` 会在同一进程里**二次打开同一媒体**并解码 10 帧，断言照样出画。
+  这条是 2026-09-12 补的，钉的是一个真正的黑屏缺陷：`Player::open()` 漏复位
+  `demuxFinished_` / `drainSent_`，于是第二个媒体一打开 demux 线程就卡在"已完成"分支
+  一个包都不读，同时 `finished()` 当场为真把主时钟冻在 0 —— **永久黑屏无画面**，
+  日志里「已打开媒体」紧跟着一行「播放结束」。它会命中任何"在同一实例里换片"的用法
+  （控制通道 `player.open`、插件 `open_media`）。故意把两行复位注释掉时，
+  这一项立刻报 `0 帧` 红（已实测）；修好后是 `10 帧`。
 - 无视频轨的媒体（纯音频）**快速判失败**，不会硬等到 60 秒超时。
 
 ### 3. 控制通道 `tools/rpc_client.py` —— 23/23 通过
@@ -519,11 +539,11 @@ pluginplayer/
 | 用例 | 实测结果 |
 |---|---|
 | `--size 99999x99999` | **exit 2**，打印"非法的 --size 值…需要 160..8192"（修复前是 ACCESS_VIOLATION 崩溃） |
-| `--size 8192x8192 --selftest` | 10/10 PASS；抓屏因像素超限**跳过落盘**（避免写出 1.6 GB 的 BMP） |
+| `--size 8192x8192 --selftest` | 11/11 PASS；抓屏因像素超限**跳过落盘**（避免写出 1.6 GB 的 BMP），但像素取证照常给出结论（8192x4608 画面矩形内清屏色占比 0.00%） |
 | `--frames 0` / `--rpc-port 99999` / `--volume 5` / `--log-level 9` | 均 exit 2 并打印合法范围 |
 | 不存在的文件 / 空文件 / 非媒体文件 | 优雅 exit 2，无崩溃 |
 | 纯音频（`.m4a`）自检 | **0.6 秒**内 FAIL 并说明"媒体没有视频轨"（修复前要硬等 60–80 秒） |
-| 0.5 秒短媒体自检 | `9/9 通过，跳过 1 项`（seek 明确标为未验证），1.4 秒完成 |
+| 0.5 秒短媒体自检 | `10/10 通过，跳过 1 项`（seek 明确标为未验证），0.96 秒完成 |
 | 畸形 JSON（纯文本 / 2MB 巨型包 / 二进制 / 深嵌套） | 返回 `ok:false`，进程存活 |
 | 超长单条报文（4.5 MB） | 服务端拒绝并断开，内存不再增涨（修复前工作集可从 124 MB 涨到 571 MB） |
 | 第 9 条并发连接 | 被拒绝（上限 8） |
@@ -671,7 +691,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 - `versions-align` 原本只判断"版本串在 README 里出现过"，而 README 在 CVE 表、变更记录里
   也会出现同一个版本号 —— 改错依赖表照样过。已收紧为"必须在依赖表那一行里"。
 
-### 12. 单元测试与 CI —— 75 + 108 项通过，本地 CI 6/6 阶段
+### 12. 单元测试与 CI —— 83 + 108 项通过，本地 CI 6/6 阶段
 
 ```bat
 F:\Python314\python.exe build.py --unit                        :: C++ 单元测试
@@ -680,7 +700,7 @@ ci.bat                                                          :: 一键跑全�
 ```
 
 ```
-==== 单元测试: 75/75 项通过，跳过 0 项，失败 0 项 ====       ← tests/unit/（C++，零依赖 harness）
+==== 单元测试: 83/83 项通过，跳过 0 项，失败 0 项 ====       ← tests/unit/（C++，零依赖 harness）
 Ran 108 tests in 0.900s
 OK                                                          ← tests/python/（标准库 unittest）
 
@@ -696,6 +716,7 @@ OK                                                          ← tests/python/（
 | `path` | 11 | 白名单包含判定：前缀欺骗、`..` 穿越、大小写、UNC、`scheme://` 与盘符 `C://` 的区分 |
 | `json` | 12 | 严格 JSON：重复键、未闭合、尾随垃圾、01 前导零、深嵌套上限、转义往返、**键名出现在值里不误命中**、数组元素类型、键注入 |
 | `hash`/`png` | 7 | SHA-256 已知向量；PNG 独立重解析（签名/IHDR/**逐块 CRC32**/IDAT 解回像素逐字节比对/Adler32） |
+| `capture` | 8 | 抓屏取证（`render_and_capture` 的判据）：子区域统计、**pitch 带行填充**（防止按 `w*4` 走）、矩形裁剪、alpha 不参与比较、纯黑必须算 0 而非法参数必须算 −1 |
 | `eventbus` | 13 | EMIT/WATERFALL/SERIAL/BAIL 四种语义、短路、owner 撤销、分发中撤销自身 |
 | `registry` | 11 | 服务/命令/帧链的注册与按 owner 撤销、优先级顺序、DROP/BAIL 短路、缓冲区边界 |
 | `config` | 9 | 注释与空白、重复键、dirty 语义（写同值不置脏）、原子保存、类型解析、超长行截断 |
@@ -724,6 +745,13 @@ C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个�
   占 y 90~809，顶部三块 OSD 在 0~86、底部频谱/信息行/进度条在 810~900，**画面零遮挡**。
   黑边放不下时（例如全屏 16:9 播 16:9）仍会退回画面内，此时可按 **`O`** 一键整体隐藏
   OSD —— 隐藏时连 `osd.draw` 都不广播，插件连绘制都省了。
+  > 上述"零遮挡"只在**有黑边**的组合下成立。源与窗口同为 16:9 时画面矩形≈满窗，
+  > OSD 必然压在画面上（实测抓屏可见信息面板盖住素材左上角）—— 这是待办，不是已解决。
+  >
+  > 另外补一句诚实的账：把抓屏改到 `Present` 之前读回**是必要的但不是充分的**。
+  > 2026-09-12 复核发现那张"证据图"里**根本没有画面**（86.60% 是清屏色），因为自检的
+  > seek 步骤抢先把 `lastUploadedIndex_` 改成了当前帧，抓屏前那次上传于是被去重跳过。
+  > 现在上传改由 `pumpAndUpload(force)` 显式保证，并且这条断言会直接检查像素。
 
 ```bat
 chcp 936                            :: 先把控制台钉到 GBK（复现条件）
@@ -736,6 +764,44 @@ chcp                                :: → Active code page: 65001（修复前�
 修复前：rc=2   avformat_open_input 失败: ... (Invalid argument)
 修复后：rc=0   [PASS] open_media — 480x852 29.97 fps dur=78.46 s codec=h264/aac
 ```
+
+### 14. 二次打开媒体必然黑屏（2026-09-12 复现并修复）
+
+**症状**：在**同一个进程里换片**（控制通道 `player.open`、插件 `open_media`，
+也就是"先起一个实例、再往里送文件"这种用法）——第二个媒体打开后**永久黑屏无画面**：
+没有画面、没有声音、`position` 卡在 0，而且日志里「已打开媒体」紧跟着一行「播放结束」。
+
+**根因**：`Player::open()` 复位了绝大多数跨媒体状态，**漏了两个**：
+`demuxFinished_` 与 `drainSent_`。第一个媒体读到 EOF 时它们被置真，于是第二个媒体
+一打开：① `demuxLoop()` 进循环第一件事就是 `if (demuxFinished_) { sleep; continue; }`
+—— **一个包都不读**；② `finished()` 同时满足（旧实现只要求"队列此刻为空"，而刚 open
+时缓冲区当然是空的）→ `masterClock()` 立刻返回被冻结的 `extPts_`(=0) →
+`pumpFrame()` 永远取不出帧 → `tex_` 从不创建。App 层状态（`lastUploadedIndex_` /
+`completedFired_`）当时是复位了的，**漏的是 Player 层**，所以这个缺陷一直没被自检碰到。
+
+**修复**：
+
+- `Player::open()` 补上 `demuxFinished_` / `drainSent_` 复位（并与新增的排水标志一起复位）。
+- `finished()` 不再只看"队列此刻为空"，改为要求**解码器真的排空**：视频/音频解码线程
+  处理完 drain 空包且 `avcodec_receive_frame` 返回 EOF 时置 `vDrained_` / `aDrained_`，
+  `flushAfterSeek()` 与 `open()` 负责置回。这样"刚 open、还没喂上第一批数据"
+  和"主线程恰好把帧取空"都不会再被误判成播放结束（旧实现还会因此**提前**对外发
+  `media.eof` / `player.completed`，自动续播类插件会误以为片子放完了）。
+- `--selftest` 新增 `reopen_media` 步骤把它钉住（见「验证结果」第 2 节）。
+
+**实测（本机，`--selftest` + 控制通道时间线两路取证）**：
+
+| 用例 | 修复前 | 修复后 |
+|---|---|---|
+| `reopen_media` 步骤（二次打开后解码 10 帧） | **FAIL，显示 0 帧** | **PASS，显示 10 帧** |
+| `player.open` 换片后的 `player.stats` | `position=0.000 decoded=0 vqueue=0 abuf=0` **冻结 4.8 s** | `decoded=17 vqueue=15 abuf=572160` 正常推进 |
+| 换片后的日志 | `已打开媒体` → `播放结束`（立刻） | 正常播放，不再提前报完 |
+| 播到结尾（seek 到 duration−2s 播完） | — | 仍正常收到 `media.eof` + `player.completed`，`position=104.874/104.875` |
+
+**顺带说明（未改的部分，如实记录）**：原计划里还有一条"首帧上屏前不推进主时钟 /
+把 `openAudio()` 推迟到首帧就绪"的加固。实际用控制通道扫了 9 个素材
+（852x480 到 794 MB、含纯视频 mp4 与纯音频 m4a）**都没有复现出首开黑屏**，
+所以**没有做这处改动** —— 没有复现证据就不改行为。
 
 ---
 
@@ -750,7 +816,7 @@ chcp                                :: → Active code page: 65001（修复前�
 | 外部控制 | 无 | JSON-RPC 控制通道 |
 | 精确 seek | 无 | 有（seek 后丢帧对齐，`dropBefore_`） |
 | 音频时钟 | 音频/视频/外部三种主时钟 | 音频优先 + **停滞自动退回墙钟** |
-| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（183 项）、`tools/verify.py` 18 条机械门禁（含自检）、`ci.bat` 一键编排 |
+| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG（含**像素级**断言"画面真的画上去了"）；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（191 项）、`tools/verify.py` 18 条机械门禁（含自检）、`ci.bat` 一键编排 |
 | 外部控制的安全 | 无外部控制 | JSON-RPC 强制令牌认证 + 报文/并发上限；网络输入默认拒绝 |
 
 ---

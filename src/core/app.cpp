@@ -14,6 +14,16 @@ namespace pp {
  * 超过则只验证"抓屏成功"，不写文件，避免写出 GB 级 BMP。 */
 static const int64_t kMaxCapturePixels = 4096LL * 4096LL;
 
+/* 清屏色：renderFrame 用它铺底，自检抓屏取证也拿它当**参照色**。
+ * 写成常量而不是两处各写一遍 —— 两边一旦漂开，取证判据就静默失效了。 */
+static const uint8_t kClearR = 16, kClearG = 16, kClearB = 20;
+
+/* 自检取证：画面矩形内"恰好等于清屏色"的像素占比上限，超过即认为画面没被绘制。
+ * 依据：纹理没画上去时该占比接近 1（本机实测 86.6%，其余是 OSD 叠加层）；
+ * 真实画面哪怕是一整帧 YUV 有限范围的黑场，转成 RGBA 也是 (0,0,0) 附近，
+ * 占比在 0 量级。阈值取在两者中间，两侧都留足余量。 */
+static const double kMaxClearRatioInVideo = 0.80;
+
 /* ======================= 初始化 ======================= */
 
 bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
@@ -342,14 +352,18 @@ void App::handleKey(const SDL_Event& e) {
 
 /* ======================= 帧泵 + 上传 ======================= */
 
-void App::pumpAndUpload() {
-    if (!player_.isOpen()) return;
+bool App::pumpAndUpload(bool force) {
+    if (!player_.isOpen()) return false;
     player_.pumpFrame();
 
     /* currentFrame() 返回 shared_ptr 副本，插件/seek 并发改动 current_ 也不会悬空 */
     auto frame = player_.currentFrame();
-    if (!frame) return;
-    if (frame->index == lastUploadedIndex_) return;
+    if (!frame) return false;
+    /* 去重：主循环每轮都会调本函数，没有这道检查就会空转重传同一帧。
+     * force 跳过它 —— 自检抓屏要的正是"把当前帧真的画上去一次"，而那一帧
+     * 可能已经被 seek 步骤"看过"（index 落在 lastUploadedIndex_ 上），
+     * 但屏幕上一次都没画过。 */
+    if (!force && frame->index == lastUploadedIndex_) return false;
     lastUploadedIndex_ = frame->index;
 
     /* 插件帧处理链（WATERFALL：可原地改写像素 / 中止链 / 丢弃帧） */
@@ -366,7 +380,7 @@ void App::pumpAndUpload() {
     int chainResult = host_.runFrameChain(&view);
     if (chainResult == PP_CHAIN_DROP) {
         PP_DEBUG("帧 #%lld 被插件丢弃", (long long)frame->index);
-        return;
+        return false;
     }
 
     if (!tex_ || texW_ != frame->w || texH_ != frame->h) {
@@ -375,12 +389,19 @@ void App::pumpAndUpload() {
                                  SDL_TEXTUREACCESS_STREAMING, frame->w, frame->h);
         if (!tex_) {
             PP_ERROR("创建纹理失败: %s", SDL_GetError());
-            return;
+            texW_ = texH_ = 0;   /* 别留下"已经有纹理"的假状态，下一轮还能重建 */
+            return false;
         }
         texW_ = frame->w;
         texH_ = frame->h;
     }
-    SDL_UpdateTexture(tex_, nullptr, frame->rgba.data(), frame->pitch);
+    /* 上传失败必须如实返回失败：早期版本忽略返回值，于是"纹理存在但内容没更新"
+     * 会被自检当成上传成功。 */
+    if (!SDL_UpdateTexture(tex_, nullptr, frame->rgba.data(), frame->pitch)) {
+        PP_ERROR("上传帧到纹理失败: %s", SDL_GetError());
+        return false;
+    }
+    return true;
 }
 
 /* ======================= 渲染 ======================= */
@@ -399,7 +420,7 @@ void App::renderFrame() {
     winW_ = rw;
     winH_ = rh;
 
-    SDL_SetRenderDrawColor(ren_, 16, 16, 20, 255);
+    SDL_SetRenderDrawColor(ren_, kClearR, kClearG, kClearB, 255);
     SDL_RenderClear(ren_);
 
     /* 画面矩形（letterbox 后的 dst）：OSD 插件据此避开画面、把叠加层画进黑边。
@@ -424,6 +445,15 @@ void App::renderFrame() {
         vw = dst.w;
         vh = dst.h;
     }
+
+    /* 记下画面矩形与"这一轮有没有画面"：自检抓屏取证要用它把该是画面的区域
+     * 圈出来（对整窗统计会被 OSD 的占比淹掉）。无画面时上面已把整窗当作画面，
+     * 此时 videoRectValid_ 为 false，取证会明确报"无法取证"而不是给个假数字。 */
+    videoRectX_ = vx;
+    videoRectY_ = vy;
+    videoRectW_ = vw;
+    videoRectH_ = vh;
+    videoRectValid_ = (tex_ != nullptr);
 
     /* OSD 阶段：把绘制权交给插件（O 键可整体隐藏，连 osd.draw 都不广播） */
     if (!osdHidden_) {
@@ -614,6 +644,11 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     int savedPngs = 0;
     int chainDropped = 0;
     int framesAvail = frames;
+    /* 自检自己数"看到过哪些帧"用的序号。**不能**拿 lastUploadedIndex_ 当它用：
+     * 那个成员的不变量是"只有 pumpAndUpload 会写"，自检去写就会把去重判据搞坏 ——
+     * 后面的抓屏步骤于是以为"这一帧已经在屏幕上了"而跳过上传，抓出来的
+     * 证据图里只剩清屏色与 OSD（这正是 P0-1 要修的那个 bug）。 */
+    int64_t lastSeenIdx = -1;
     if (mi.has_video && mi.duration > 0 && mi.fps > 0.001)
         framesAvail = (int)(mi.duration * mi.fps);
     if (framesAvail < 1) framesAvail = 1;
@@ -641,9 +676,9 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
             rpc_.pumpMainThread();
             player_.pumpFrame();
             auto frame = player_.currentFrame();
-            if (frame && frame->index != lastUploadedIndex_) {
+            if (frame && frame->index != lastSeenIdx) {
                 stall = 0;
-                lastUploadedIndex_ = frame->index;
+                lastSeenIdx = frame->index;
 
                 PP_FrameView view{};
                 view.data = frame->rgba.data();
@@ -691,13 +726,13 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         player_.seekAbsolute(target);
         int got = 0;
         double dl = (double)SDL_GetTicks() / 1000.0 + 20.0;
-        double lastIdx = (double)lastUploadedIndex_;
+        double lastIdx = (double)lastSeenIdx;   /* seek 之前看到的最后一帧序号 */
         if (mi.has_video) {
             while (got < 5 && (double)SDL_GetTicks() / 1000.0 < dl) {
                 rpc_.pumpMainThread();
                 player_.pumpFrame();
                 auto f = player_.currentFrame();
-                if (f && f->index != lastUploadedIndex_) { lastUploadedIndex_ = f->index; got++; }
+                if (f && f->index != lastSeenIdx) { lastSeenIdx = f->index; got++; }
                 SDL_Delay(2);
             }
         }
@@ -719,44 +754,73 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
                                 player_.duration()));
     }
 
-    /* --- 调用插件命令（约定：argv 只含实参，不含命令名） --- */
+    /* --- 调用插件命令（约定：argv 只含实参，不含命令名） ---
+     * 返回码必须一起断言。早期版本只统计"调用了几条命令"，于是
+     * `snapshot -> -1`（写文件被白名单拒了）也照样 PASS —— 这一步在最需要它
+     * 的时候失去把关能力，还把"命令链路通了"的错觉写进了验证记录。 */
     const char* snapArgv[1] = { outDir.c_str() };
-    int cmdsRun = 0;
-    std::string cmdDetail;
-    if (host_.commands().has("snapshot")) {
-        int r = host_.invokeCommand("snapshot", 1, snapArgv);
+    int cmdsRun = 0, cmdsFailed = 0;
+    std::string cmdDetail, cmdHint;
+    auto runCmd = [&](const char* name, const char* label, int argc, const char** argv) {
+        int r = host_.invokeCommand(name, argc, argv);
         cmdsRun++;
-        cmdDetail += format("snapshot %s -> %d  ", outDir.c_str(), r);
-    }
-    if (host_.commands().has("stats")) {
-        int r = host_.invokeCommand("stats", 0, nullptr);
-        cmdsRun++;
-        cmdDetail += format("stats -> %d  ", r);
-    }
+        cmdDetail += format("%s -> %d  ", label, r);
+        if (r == 0) return;
+        cmdsFailed++;
+        if (strcmp(name, "snapshot") == 0) {
+            cmdHint = format("：snapshot 返回 %d —— 要么当前没有可用帧，要么写文件被拒"
+                             "（插件只能往 exeDir(=%s) 写；输出目录 %s 不在白名单内时，"
+                             "用 --write-dir %s 追加，或把 --out 放到 dist/ 下）",
+                             r, exeDir().c_str(), outDir.c_str(), outDir.c_str());
+        } else {
+            cmdHint = format("：%s 返回 %d（约定 0 = 成功）", label, r);
+        }
+    };
+    if (host_.commands().has("snapshot")) runCmd("snapshot", "snapshot", 1, snapArgv);
+    if (host_.commands().has("stats")) runCmd("stats", "stats", 0, nullptr);
     if (host_.commands().has("effect.toggle")) {
         const char* a1[1] = {"gray"};
-        int r = host_.invokeCommand("effect.toggle", 1, a1);
-        cmdsRun++;
-        cmdDetail += format("effect.toggle gray -> %d  ", r);
+        runCmd("effect.toggle", "effect.toggle gray", 1, a1);
         /* 开一下再关掉，确认链路可逆 */
         host_.invokeCommand("effect.toggle", 1, a1);
     }
-    addStep("plugin_commands", cmdsRun > 0,
-            cmdsRun ? cmdDetail : "没有任何插件注册命令（异常）");
+    addStep("plugin_commands", cmdsRun > 0 && cmdsFailed == 0,
+            cmdsRun ? (cmdDetail + cmdHint) : std::string("没有任何插件注册命令（异常）"));
 
-    /* --- 渲染一次并抓屏（验证渲染管线可用） ---
+    /* --- 渲染一次并抓屏，然后**验证抓屏里真的有画面** ---
+     * 这一项以前只断言 `surf != nullptr`，等于"SDL 没报错就算过"。实测抓到的
+     * 图里根本没有画面：86.6% 的像素恰好是清屏色 RGB(16,16,20)，其余全是 OSD，
+     * 纯黑占 0.00% —— 一张不含画面的"证据图"却写进了验证记录，等于没验证。
+     * 现在断言三件事：
+     *   ① force 上传真的成功（不去重）；
+     *   ② 抓屏成功；
+     *   ③ 画面矩形内"恰好等于清屏色"的像素占比低于阈值。
+     * 判据见 util.h 的 rgbaColorRatioInRect 与上面的 kMaxClearRatioInVideo：
+     * "图是黑的"说明不了问题（黑场是合法内容），"整片是清屏色"才说明没画上去。
      * 抓屏产物只是自检证据，不是运行时功能。对超大帧主动跳过落盘，
      * 否则会写出 GB 级 BMP（历史实测 --size 20000 写出过 1.6 GB）。
-     * 读回必须发生在 Present 之前：Present 之后后备缓冲内容未定义，
-     * 历史实测这张"证据图"一直是全黑 —— 等于没有证据价值。 */
-    pumpAndUpload();
+     * 读回必须发生在 Present 之前：Present 之后后备缓冲内容未定义。 */
+    bool uploaded = pumpAndUpload(true);
     renderFrame();
     SDL_Surface* surf = SDL_RenderReadPixels(ren_, nullptr);
     SDL_RenderPresent(ren_);
     bool captured = (surf != nullptr);
     bool shot = false;
+    double clearRatio = -1.0;
     std::string capDetail;
     if (surf) {
+        /* 读回缓冲的字节序由渲染后端决定（本机 D3D11 上实测是 RGBA，但不能假定），
+         * 统一转成 RGBA32 再取样 —— 否则在 BGRA 后端上会把 R 与 B 读反，
+         * 取证判据会得出一个"看着合理"的错结论。 */
+        SDL_Surface* rgba = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+        if (rgba && videoRectValid_)
+            clearRatio = rgbaColorRatioInRect((const uint8_t*)rgba->pixels, rgba->pitch,
+                                              rgba->w, rgba->h,
+                                              (int)videoRectX_, (int)videoRectY_,
+                                              (int)videoRectW_, (int)videoRectH_,
+                                              kClearR, kClearG, kClearB);
+        if (rgba) SDL_DestroySurface(rgba);
+
         const int64_t px = (int64_t)surf->w * (int64_t)surf->h;
         if (px > kMaxCapturePixels) {
             capDetail = format("渲染抓屏成功（%dx%d = %lld 像素），超过 %lld 上限，跳过落盘以免写出超大 BMP",
@@ -778,7 +842,18 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         capDetail = format("抓屏失败: %s", SDL_GetError());
     }
     (void)shot;
-    addStep("render_and_capture", captured, capDetail);
+
+    if (!uploaded) capDetail += "；帧未被上传到纹理（屏幕上不会有画面）";
+    if (clearRatio < 0.0) {
+        capDetail += "；未能取证（没有画面矩形，或读回缓冲转换失败）";
+    } else {
+        capDetail += format("；画面矩形 %dx%d@(%d,%d) 内清屏色占比 %.2f%%（上限 %.0f%%）",
+                            (int)videoRectW_, (int)videoRectH_, (int)videoRectX_, (int)videoRectY_,
+                            clearRatio * 100.0, kMaxClearRatioInVideo * 100.0);
+    }
+    bool evidenceOk = captured && uploaded && clearRatio >= 0.0 &&
+                      clearRatio < kMaxClearRatioInVideo;
+    addStep("render_and_capture", evidenceOk, capDetail);
 
     /* --- 卸载/重载往返测试（验证注册撤销干净） --- */
     int beforeSubs = host_.bus().totalSubscriptions();
@@ -807,10 +882,66 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     }
     addStep("plugin_hot_reload", reloadOk, reloadDetail);
 
-    /* --- 统计与产出 --- */
-    double elapsed = (double)SDL_GetTicks() / 1000.0 - t0;
+    /* --- 统计快照 ---
+     * 位置很关键：它在下面的 reopen_media 回归**之前**取。报告里的 playback
+     * 描述的是「首次打开 → 解码 → seek → 调插件命令 → 抓屏」这段会话，
+     * 不能被二次打开的结果覆盖。 */
     PP_PlaybackStats st{};
     player_.fillStats(&st);
+
+    /* --- 二次打开同一媒体（回归：open 必须复位全部跨媒体状态） ---
+     * 历史缺陷（2026-09-12 复现并修掉）：Player::open() 漏复位 demuxFinished_ /
+     * drainSent_。第一个媒体到 EOF 时它们被置真，于是第二次打开后 demux 线程
+     * 一进循环就命中"已完成"分支、一个包都不读；同时 finished() 当场为真，
+     * 主时钟被冻在 0 —— 表现就是**永久黑屏无画面**，日志里「已打开媒体」紧跟着
+     * 一行「播放结束」。App 层的状态（lastUploadedIndex_ / completedFired_）
+     * 当时是复位了的，漏的是 Player 层，所以这个缺陷此前一直没被自检碰到。
+     * 这里重新打开同一媒体并解码若干帧，断言真的出画。 */
+    bool reopenOk = false;
+    std::string reopenDetail;
+    {
+        const int rTarget = std::min(10, framesAvail);
+        const int rMin = std::max(1, rTarget - 1);
+        int rFrames = 0;
+        int rChainDrop = 0;
+        bool rOpened = openMedia(media);
+        int64_t rSeen = -1;
+        double rDeadline = (double)SDL_GetTicks() / 1000.0 + 15.0;
+        while (rOpened && rFrames < rTarget && (double)SDL_GetTicks() / 1000.0 < rDeadline) {
+            rpc_.pumpMainThread();
+            player_.pumpFrame();
+            auto f = player_.currentFrame();
+            if (f && f->index != rSeen) {
+                rSeen = f->index;
+                PP_FrameView view{};
+                view.data = f->rgba.data();
+                view.width = f->w;
+                view.height = f->h;
+                view.pitch = f->pitch;
+                view.format = PP_PIXFMT_RGBA8888;
+                view.pts = f->pts;
+                view.index = f->index;
+                view.serial = f->serial;
+                int cr = host_.runFrameChain(&view);
+                if (cr == PP_CHAIN_DROP) { rChainDrop++; continue; }
+                rFrames++;
+            }
+            SDL_Delay(2);
+        }
+        /* 下限与 decode_and_display 同一口径：目标减 1（容忍 EOF 边界丢的最后一帧），
+         * 而不是"出几帧就算过"。 */
+        reopenOk = rOpened && rFrames >= rMin;
+        reopenDetail = rOpened
+            ? format("二次打开后解码并显示 %d 帧（目标 %d，可接受下限 %d）%s，被插件丢弃 %d 帧",
+                     rFrames, rTarget, rMin,
+                     rFrames >= rMin ? "" : "；一次都没出画 = 第二次 open 后播放没起来",
+                     rChainDrop)
+            : format("二次打开失败: %s", lastError_);
+    }
+    addStep("reopen_media", reopenOk, reopenDetail);
+
+    /* --- 产出 --- */
+    double elapsed = (double)SDL_GetTicks() / 1000.0 - t0;
 
     int pass = 0, counted = 0, skippedN = 0;
     for (const auto& s : steps) {

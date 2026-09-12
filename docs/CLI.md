@@ -192,7 +192,7 @@ pluginplayer selftest
 pluginplayer selftest --frames 90 --out selftest_out_cli
 ```
 
-实测 4.5 秒完成、10/10 项通过（见第 8 节）。`selftest` 的"零参数可用"是刻意做的：
+实测 11/11 项通过（见第 8 节）。`selftest` 的"零参数可用"是刻意做的：
 样例缺失时用 `vendor/ffmpeg` 现场生成（命令与 `selftest.bat` 完全一致），
 所以不必先手工准备素材。
 

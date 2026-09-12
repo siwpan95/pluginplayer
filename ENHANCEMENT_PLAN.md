@@ -1,0 +1,466 @@
+# PluginPlayer 播放体验增强规划（v1 草案）
+
+> 状态：**规划阶段，尚未动手改代码**
+> 基线：`G:\local\pluginplayer` @ `af6bacc`（工作树含未提交产物目录 `_dist_baseline_backup` / `_vendor_backup_20260912`）
+> 诊断日期：2026-09-12
+> 关联约束：[AGENTS.md](AGENTS.md)（仓库规则与验证门槛）、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+
+---
+
+## 0. 结论卡（TL;DR）
+
+**当前项目的问题不在工程纪律，而在两件事：① 一条被自己"证据图"掩盖的渲染/验证缺陷；② 画质与体验链路的技术选型只做到"能播"。**
+
+| # | 结论 | 状态 | 关键依据 |
+|---|---|---|---|
+| 1 | **自检的"可视证据图" `render_output.bmp` 里根本没有视频画面** —— 86.62% 的像素恰好等于窗口清屏色 `RGB(16,16,20)`，纯黑占 0.00%，非背景部分只有 OSD。也就是说这张证据图从启用以来就没有证明过"画面出得来" | ~~已实测确认~~ → **已修复（B1，2026-09-12）**，同一指标 86.60% → 0.39% | 像素直方图（§1.3）+ `app.cpp:352` 与 `app.cpp:700` 的交互；修复记录见 §4 P0-1 |
+| 2 | OSD 用 SDL 调试点阵字体 + `sanitize()` 把非 ASCII 全部降级成 `?`，**中文界面信息 100% 不可读** | **已实测确认** | 抓屏截图（§1.4）+ `osd.cpp:44-66` + `player_plugin.h:274` |
+| 3 | OSD 默认**压在画面上**：16:9 窗口播 16:9 素材时没有黑边可避让，而两个 OSD 面板正好盖住左上角（素材水印所在处） | **已实测确认** | §1.4 截图与几何计算（§2.5） |
+| 4 | 渲染/解码链路**没有色彩管理、没有硬件解码**，缩放只剩 SDL 的双线性采样 | **已确认（读码）** | `player.cpp:553-578`、全仓无 `AVHWDeviceType` |
+| 5 | "黑屏无画面"：**已复现并修复**。真因不是时序竞争，而是 `Player::open()` 漏复位 `demuxFinished_`/`drainSent_` —— 同一进程里换片时 demux 线程一个包都不读，`finished()` 当场为真把主时钟冻在 0 ⇒ **必然永久黑屏**（控制通道 `player.open`、插件 `open_media` 都会命中） | **已修复（B2，2026-09-12）**；曾用注释掉两行复位复现 | 修复记录与证据见 §4 P0-2；回归用例 `--selftest` 的 `reopen_media` |
+| 6 | 依赖侧**已经具备**升级条件：随包 SDL3 3.4.16 支持 NV12 纹理、YCbCr 矩阵、D3D11 外部设备复用；FFmpeg 9.0.1 头文件带 `BindFlags`。零拷贝硬解路线可行 | **已核验** | `vendor/sdl3/include/SDL3/SDL_render.h:565,814`、`SDL_pixels.h:670,1066`、`vendor/ffmpeg/include/libavutil/hwcontext_d3d11va.h:103,166,174` |
+
+**建议路线**：P0 先修"看不见/不可信"，P1 补"看得对"（色彩 + 中文 + 鼠标 + 字幕），P2 补"看得好/好用"（GPU 着色器画质链、播放列表、HDR）。
+**架构红线**：内核只升级**能力通道**，功能仍然**全部做成插件**（Cordis 模型不破）。
+
+---
+
+## 1. 诊断的证据基础（可复现）
+
+以下所有数据都是本次实跑得到，命令与原始输出可复核。
+
+### 1.1 环境与实际媒体
+
+用户日志 `dist/logs/pluginplayer.log` 显示的真实播放对象（**文件仍在**）：
+
+```
+G:\repos\bilibili-helper-py\output\第二十届FIRST青年电影展FIRST PIONEER先锋创作年度入围｜《香港糖果盒》预告片.mp4
+mov,mp4,m4a,3gp,3g2,mj2  852x480  24.00 fps  dur=104.87 s  h264/aac  471 kbps  1ch/48kHz
+```
+
+### 1.2 自检实跑（结果 PASS，但可看到真问题）
+
+```powershell
+# 注意：必须用「调用运算符」传参。Start-Process -ArgumentList 会把中文路径
+# 按 ANSI 转换而破坏它（实测 open_media 直接 FAIL，路径被截断）。
+Set-Location G:\local\pluginplayer\dist
+& .\pluginplayer.exe --selftest --frames 60 --rpc-port 0 --out <OUT> "<上述中文路径 mp4>"
+```
+
+```json
+{ "result": "PASS", "pass": 10, "total": 10, "elapsed_sec": 3.422,
+  "playback": { "displayed": 65, "decoded": 105, "dropped": 24,
+                "position": 62.987, "master_clock": 62.987, "video_clock": 62.958 },
+  "steps": [ { "name": "plugin_commands", "ok": true,
+               "detail": "snapshot <OUT> -> -1  stats -> 0  effect.toggle gray -> 0" },
+             { "name": "render_and_capture", "ok": true,
+               "detail": "渲染帧已抓屏保存: <OUT>/render_output.bmp (1280x720)" } ] }
+```
+
+三条从这份 PASS 里读出来的**反例**：
+
+- `snapshot -> -1`：命令**失败**（写入白名单外，被宿主拒绝），但 `plugin_commands` 仍判 **PASS** —— 该步只断言"命令被调用过"（`app.cpp:744`），不校验返回码。README 里写的 `snapshot -> 0` 是因为当初把 `--out` 放在 `dist/` 内。
+- `render_and_capture` 只断言 `surf != nullptr`（`app.cpp:781`），**从不校验抓到的图里有没有画面** —— 见 §1.3，确实没有。
+- `dropped: 24 / decoded: 105`（≈23%）：这是自检"无节拍紧循环"的产物，**不代表真实播放丢帧率**，引用时须注明。
+
+### 1.3 决定性的像素直方图 —— 证据图里没有画面
+
+对 `render_output.bmp`（1280x720，自检声称的"渲染帧已抓屏保存"）做精确颜色直方图：
+
+```
+size=1280x720 total_px=921600
+  RGB(16, 16, 20)   798301   86.62%   <-- 恰好是 app.cpp:402 的 SDL_SetRenderDrawColor 清屏色
+  RGB(7,  7,  8)     56399    6.12%   <-- 半透明 OSD 面板 (alpha=170) 与背景混合的结果
+  RGB(6,  6,  7)     45356    4.92%   <-- 同上
+  RGB(90, 200, 255)   4488    0.49%   <-- OSD 文字高亮色
+  ...（其余均为 OSD 颜色）
+纯黑(0,0,0) 占比: 0.00%
+采样点（避开 OSD）：(640,360)/(320,360)/(960,240)/(640,180)/(40,600) 全部 = RGB(16,16,20)
+```
+
+**推理**：素材 852x480 与窗口 1280x720 **同为 16:9**，`app.cpp:408-425` 会把画面矩形算成接近满窗（实测 `dst ≈ {x:1,y:0,w:1278,h:720}`）——即整个窗口都该是画面。但窗口中心的采样点拿到的是**恰好等于清屏色**的值。若画面被画上去，YUV 有限范围的黑场转出来是 `RGB(0,0,0)` 附近而不是 `(16,16,20)`；纯黑占比 0.00% 说明连画面里的黑都没有。
+
+**根因（读写路径交叉确认）**：
+
+```cpp
+// app.cpp:345-383  pumpAndUpload()
+auto frame = player_.currentFrame();
+if (!frame) return;
+if (frame->index == lastUploadedIndex_) return;   // ← 352：索引没变就直接返回，tex_ 永不创建
+...
+SDL_UpdateTexture(tex_, nullptr, frame->rgba.data(), frame->pitch);
+```
+
+```cpp
+// app.cpp:696-701  selftest 的 seek 循环：已经把这个 index 记掉了
+if (f && f->index != lastUploadedIndex_) { lastUploadedIndex_ = f->index; got++; }
+// ...
+// app.cpp:752  随后才调用 pumpAndUpload()
+pumpAndUpload();
+```
+
+seek 循环把 `lastUploadedIndex_` 更新到"当前帧"，紧接着 `pumpAndUpload()` 里 `pumpFrame()` 因为下一帧的 `pts > master + 4ms`（`player.cpp:841`）拿不到新帧，`currentFrame()` 还是同一帧 → **`index` 相等 → 直接 return → `tex_` 从未创建 → 抓屏里只有背景与 OSD**。
+
+**可证伪的预测**：在 `app.cpp:752` 的 `pumpAndUpload()` 之前插一行 `lastUploadedIndex_ = -1;`，`render_output.bmp` 应当立刻出现画面。这个实验很小，建议作为 P0-1 的验收实验。
+
+> 影响面：README「验证结果」第 2 节、第 13 节关于"抓屏证据"与"画面零遮挡"的结论，其证据目前不成立；`docs/ARCHITECTURE.md` 第 8 节"渲染几何一律按 `SDL_GetWindowSizeInPixels`"的论证也需要重新出图。
+
+### 1.4 抓屏截图（OSD 中文与遮挡的直接证据）
+
+抓屏图（`_render_output.png`，本次实跑产物）中可以看到：
+
+- 左上信息面板：`?????????????FIRST????????????FIRST PIONEER????????????...` 与 `last=????????.mp4` —— **中文全部变成 `?`**。
+- 若把 OSD 关掉（`O` 键），这块区域是素材自带的水印 —— 也就是说 **OSD 面板正好盖住了素材的左上角内容**。
+- 底部两条半透明带（`RGB(7,7,8)` / `RGB(6,6,7)`）就是 `osd.panel` 的 48px 进度区与 FFT 面板底板。
+
+---
+
+## 2. 问题清单（按你勾选的五个维度）
+
+### 2.1 正确性：黑屏 / 画面不出
+
+**A. 已确认：自检渲染证据失效**（§1.3）。危害不只是"证据图难看"，而是**接下来所有画质增强都无法验证** —— 改完色彩/缩放，你没有任何可信的对比图。**这是画质工作的前置阻塞项。**
+
+**B. "黑屏无画面"——已复现并修复（B2）。** 下面是初版读码时的推断链，**保留原文**，
+因为它记录了"方向对了一半"的过程：`finished()` 的语义确实有问题，但我当时把一个
+**确定性缺陷**（`open()` 漏复位两个跨媒体标志）误判成了"只在特定时序下触发的竞争"。
+真实根因与修复见 §4 P0-2。初版推断原文如下：
+
+> 读码可确定下面这条链路存在，但它只在特定时序下触发，**我没有复现出来**（本次对这个文件自检是 PASS），所以标记为待确认而非结论：
+
+```cpp
+// player.cpp:457-467
+bool Player::finished() const {
+    if (!opened_) return false;
+    if (!demuxFinished_.load()) return false;
+    if (vq_.count() > 0 || aq_.count() > 0) return false;
+    { std::lock_guard<std::mutex> lk(vfMu_); if (!vframes_.empty()) return false; }
+    if (aStream_ >= 0 && ring_.avail() > 0) return false;
+    return true;                      // ← 「缓冲区此刻为空」被判成「播放结束」
+}
+```
+
+```cpp
+// player.cpp:794-830
+double Player::masterClock() {
+    if (finished()) { extLastTick_ = now; ...; return extPts_; }   // ← 时钟被冻结
+```
+
+```cpp
+// player.cpp:834-845
+double master = masterClock();
+while (!vframes_.empty() && vframes_.front()->pts <= master + 0.004) { pick = ...; }
+// ← 时钟一旦冻结在某个值，所有 pts 更大的帧永远取不出来
+```
+
+链条：**demux 会把整个文件尽快读进队列并立刻置 `demuxFinished_ = true`**（日志 `18:11:58` 打开、同一秒就打印"demux 到达文件末尾"即为佐证，`player.cpp:406-418`）→ 音频解码比视频快，3 秒音频环形缓冲（`player.cpp:212`）先排空 → 某一刻 `vq_`/`aq_`/`vframes_`/`ring_` **同时为空**（视频解码仍在追，或主线程刚把帧取完）→ `finished()` 变真 → **主时钟冻结 → 之后所有视频帧都"在未来"，永远取不出来 → 画面定格/黑屏**，同时主循环还会提前打 `播放结束`（`app.cpp:535-540`）。
+
+**可判定的复现/排除判据**（P0-2 的第一件事）：
+
+1. 用真实窗口（不要 `--selftest`）播放一个"视频码率明显高于音频、且时长中等"的文件。
+2. 开控制通道，`pluginplayer status` 采样 `player.stats`：
+   - 若出现 `position` 远小于 `duration`、而日志已打印"播放结束"→ **假设成立**。
+   - 若 `decoded` 持续增长但 `shown` 不增长 → 时钟冻结（同一根因）。
+3. 加临时日志（`masterClock` 每次进入 `finished()` 分支时打印 `position/duration/各队列深度`）即可一眼锁定。
+
+**修复方向**（无论复现结论如何都应做，因为现在的语义就是错的）：
+
+- `finished()` 改为依赖**显式排空标志**：视频/音频解码线程各自在收到 drain 空包并吐完最后一帧后置位（现在完全没有这个标志，见 `player.cpp:604` 附近的 `isDrain` 分支）；再叠加"主时钟已到达 `duration_`"的条件。
+- `masterClock()` **不得**因为 `finished()` 而冻结在"未播完"的值；至少加"`extPts_ >= duration_ - ε` 才允许冻结"。
+- 首帧保证：在**首帧上屏之前**不要推进主时钟，或干脆"解出首帧再 `SDL_ResumeAudioStreamDevice`"（`app.cpp:133`），消除开机黑屏窗口。
+- 丢帧策略：现在"每轮只保留最后一帧"（`player.cpp:841-845`）在时钟跳跃时会静默跳过大段画面；应改为**有界追赶**（超过阈值报 `WATERFALL`/事件，让插件可感知），并把"追赶"与"正常丢帧"分开计数。
+
+### 2.2 画质：发灰 / 发虚 / 色带
+
+| 现象 | 代码依据 | 原因 |
+|---|---|---|
+| **发灰、黑位不对** | `player.cpp:553-564`：`sws_getContext(w,h,fmt, w,h,AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr,nullptr,nullptr)` | 完全不读 `AVFrame.colorspace / color_range / color_primaries / color_trc`。BT.601 与 BT.709 的矩阵、limited(16-235) 与 full(0-255) 的范围全靠 swscale 按分辨率"猜"。SD 素材按 709 解、或 full-range 按 limited 解，都会明显发灰/发白/对比度偏高 |
+| **发虚** | 同上的 `SWS_BILINEAR`，**且这里的 w/h 相同 ⇒ 这一步根本没缩放**；真正缩放发生在 `app.cpp:421` 的 `SDL_RenderTexture`，采样质量只有 SDL 的双线性（`SDL_render.h:1262`：默认 `SDL_SCALEMODE_LINEAR`） | 852→1278（1.5×）这种非整数上采样用双线性会明显糊；没有 lanczos/bicubic 可选 |
+| **色带** | 全仓无 deband/dither | 8bit 素材在平滑渐变处必然出色带，尤其低码率（本素材仅 471 kbps） |
+| **每帧 CPU 转换** | `player.cpp:578` `sws_scale` → RGBA；`app.cpp:383` `SDL_UpdateTexture` | RGBA 上传量是 NV12 的 2.67 倍；4K 下 CPU 转换 + 上传成为瓶颈 |
+| **无 HDR** | 全仓无 tone mapping | 10bit/HDR 素材会过曝或发灰 |
+
+### 2.3 性能：高分辨率掉帧
+
+- **纯软解**：全仓 grep 无 `AVHWDeviceType` / `hwaccel` / `get_format` / `av_hwframe_transfer_data`。4K HEVC/AV1 全靠 CPU。
+- **无零拷贝**：即便将来加了硬解，现在也没有"硬件帧 → SDL 纹理"的通道。
+- 队列偏小：`VIDEO_QUEUE_MAX_FRAMES = 16`（`player.cpp:18`）在 4K 下约 0.5 秒缓冲，抗抖动余量小。
+- **RPC 延迟受主循环约束**（`ARCHITECTURE.md` §2 已如实记录：60fps 下 p50 ≈ 16.6ms），加重画质处理会进一步挤压。
+
+### 2.4 功能缺失
+
+| 缺失 | 依据 | 备注 |
+|---|---|---|
+| 字幕（`.srt`/`.ass`） | 全仓无字幕解码；`set_window_subtitle` 只是改**窗口标题**（`player_plugin.h:383`，`app.cpp:543-549`） | 中文用户的核心缺口 |
+| 音轨 / 字幕轨选择 | 只取 `av_find_best_stream` 的第一条（`player.cpp:189-190`） | 多语 MKV 无法切轨 |
+| 音频输出设备选择 | 固定 `SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK`（`app.cpp:121`） | SDL3 已提供 `SDL_GetAudioPlaybackDevices`（`vendor/sdl3/include/SDL3/SDL_audio.h:547`），只是没接 |
+| 播放列表 / 媒体库 / 记忆播放 | 无 | `02-auto-resume` 只做单文件续播 |
+| 音轨音量均一化、A-B 循环、逐帧步进、视频旋转/裁边 | 无 | 常规播放器标配 |
+| 网络流 | **默认拒绝**（`app.cpp:166`） | 安全策略正确，保留 |
+
+### 2.5 交互与界面
+
+| 问题 | 依据 |
+|---|---|
+| **完全没有鼠标事件**：不能点按暂停、不能拖动进度、不能滚轮调音量 | `app.cpp:218-240` 的 `pollEvents()` 只处理 `SDL_EVENT_QUIT / KEY_DOWN / KEY_UP / WINDOW_RESIZED`。**而 `PP_TOPIC_UI_MOUSE "ui.mouse"` 在 SDK 里已经声明、在 `eventbus.cpp:15` 已经登记为 BAIL 模式，内核却从不派发它** —— 契约挖了坑没填 |
+| OSD 非 ASCII 全部变 `?` | `osd.cpp:44-66`（`sanitize()`）+ `SDL_RenderDebugText`；`player_plugin.h:274` 明文写着"内置 8x8 点阵字体，支持可打印 ASCII；非 ASCII 以 '?' 呈现" |
+| OSD 默认压画面 | 几何见 `app.cpp:407-426`：16:9 窗口播 16:9 素材 → 画面矩形≈满窗 → `osd.video_rect` 给不出可避让的黑边 → 面板盖住画面（§1.4 已实测）。`O` 键是**兜底**而不是默认 |
+| 无窗口控件（无边框/标题栏菜单/右键菜单/无缩略图预览） | 无 |
+| 字体只有 8×8 点阵，观感粗糙 | `osd.cpp:64` |
+
+---
+
+## 3. 设计原则：内核给「能力」，功能**仍然全是插件**
+
+你要求保持"一切皆插件"的 Cordis 架构。这条能成立，但需要把边界划清楚 —— **不是所有东西都能做成插件**，硬塞会破坏体验：
+
+**必须在内核里的（因为它就是"能力通道"本身）**
+
+1. **解码/呈现管线**：硬解、NV12/GPU 纹理、色彩矩阵、呈现时机 —— 这是所有画面相关能力的底座，插件够不着（插件不链接 FFmpeg/SDL3，`AGENTS.md`「架构」段）。
+2. **事件源**：鼠标/滚轮/触控必须由内核从 SDL 取出并派发到总线（现在缺的就是这一步）。
+3. **通用叠加层能力**：让插件能把"位图叠加层"或"文字"画到画面上，而不必自己碰 SDL。
+4. **真字体排版能力**：`osd.text` 支持 UTF-8 + 字号/度量，插件才有中文可读的 UI。
+5. **媒体能力**：多轨枚举与切轨、字幕包送进解码器、音频设备枚举。
+
+**仍然做成插件的（功能策略与业务）**
+
+| 功能 | 形态 | 理由 |
+|---|---|---|
+| 字幕（选轨、样式、字体、外部字幕加载、字幕搜索） | 原生插件 `subtitles` | 策略复杂、可替换；渲染由内核提供的叠加层能力承载 |
+| 播放列表 / 媒体库 / 续播 | JS 插件（Cordis） | 纯业务逻辑，热重载友好 |
+| 鼠标 UI（进度条拖拽、点按、滚轮、悬浮控件） | 原生插件 `ui_controls` + `ui.mouse` 事件 | 像 `osd_stats` 一样画在 OSD 上即可 |
+| 音轨/字幕轨/设备选择面板 | 原生或 JS 插件 | 调用内核能力即可 |
+| 画质增强（去色带、锐化、胶片颗粒、超分） | 原生插件（帧处理链）或 GPU 着色器插件 | 正是"插件"最该干的事 |
+| 音频设备切换、声道映射 | JS 插件 | 调用能力 |
+
+> **关键设计取舍（必须写进 ARCHITECTURE.md）**：现在的帧处理链（`PP_FrameView` / `PP_PIXFMT_RGBA8888`，`player_plugin.h:132-134,216-225`）是**就地改 CPU RGBA**，这是"插件零拷贝"的优点，也是像素级效果的基础。改成 NV12/GPU 帧后**不能直接砍掉它**，正确做法是：
+> **内核默认走 GPU 路径；只有当至少注册了一个帧处理器时，才额外物化一份 CPU RGBA 交给链**（并把这次物化的耗时计入统计，让"开了效果就掉帧"可观测）。GPU 侧的增强则走新增的 **GPU 帧处理链**。这样既保住画质/性能，又保住插件生态。
+
+---
+
+## 4. 分期方案
+
+### P0 —— 正确性与地基（不修完，后面所有"画质验证"都没有意义）
+
+#### P0-1 修复自检渲染证据 + 加严断言 —— **已完成（2026-09-12，B1）**
+
+**实际做法**（与初版设想的差异已注明）：
+
+- **上传语义**：`pumpAndUpload()` 改为返回 `bool`（是否真的上传成功）并新增 `force` 参数；
+  `force=true` 跳过"同一帧不重复上传"的去重（`src/core/app.h`、`src/core/app.cpp`）。
+  同时把 `SDL_UpdateTexture` 的返回值纳入判断，失败不再被当成成功。
+- **恢复不变量**：自检的 `decode_and_display` 与 `seek` 两个循环**不再改写成员
+  `lastUploadedIndex_`**，改用局部 `lastSeenIdx`。那个成员的不变量是"只有
+  `pumpAndUpload` 会写"，自检去写正是本次 bug 的根因。
+  *（初版设想是直接 `lastUploadedIndex_ = -1`；最终选了更明确、也不依赖哨兵值的 `force`。）*
+- **像素判据**：新增可移植纯函数 `pp::rgbaColorRatioInRect()`
+  （`src/core/util.h` / `util.cpp`），`render_and_capture` 断言
+  ①上传成功 ②抓屏成功 ③**画面矩形内"恰好等于清屏色"的像素占比 < 80%**。
+  清屏色写成常量 `kClearR/kClearG/kClearB` 并被 `renderFrame()` 复用，避免两处漂开；
+  读回缓冲先 `SDL_ConvertSurface` 成 RGBA32 再取样（不假定后端字节序）；
+  `renderFrame()` 记录画面矩形 `videoRectX_/Y_/W_/H_` 与 `videoRectValid_` 供取证使用。
+- **配套**：`plugin_commands` 改为断言每条命令返回码为 0，失败时给出可操作提示
+  （指出输出目录不在插件白名单内、可用 `--write-dir` 或把 `--out` 放进 `dist/`）。
+- **单测**：`tests/unit/test_capture.cpp`（8 项，可移植，Linux CI 一并跑）+
+  注册进 `build.py` 的 `UNIT_TEST_SOURCES`。
+
+**验收证据（全部实跑）**：
+
+| 项 | 结果 |
+|---|---|
+| 像素判据（同一工具、同一矩形 1278x720@(1,0)） | **修复前 86.60%（会被判红）→ 修复后 0.39%** |
+| `--selftest`（输出在 `dist/` 内，即 `selftest.bat` 口径） | **10/10 PASS**，`render_and_capture` 详情报出占比 0.00%–0.39% |
+| 新断言能判失败 | 输出目录放到白名单外时 `plugin_commands` 判 **FAIL** 并打提示；`snapshot -> -1` 不再被放过 |
+| 单元测试 | **83/83 通过**（原 75 + 新增 8） |
+| 冒烟 | `build.py --smoke` 两项 PASS |
+| 机械门禁 | `tools/verify.py` **18/18 通过** |
+| Python 测试 | `Ran 108 tests ... OK` |
+| 可视证据 | 修复后抓屏里能看到真实影片画面（此前只有清屏色 + OSD） |
+
+> **未做（如实登记）**：① 未跑 `tools/verify.py --selfcheck` —— 本次没有改动门禁本身，
+> 按 AGENTS.md 的门槛表不要求；像素断言"能判红"由上面两条（修复前 86.60% / 输出目录越界）
+> 直接证明。② `docs/ARCHITECTURE.md` 的线程模型/渲染段还没有补"`lastUploadedIndex_`
+> 不变量 + 抓屏取证判据"这两行说明，留到与 P0-3/P0-4 的渲染改动一起写，避免同一段改两遍。
+
+#### P0-2 定位并修复"黑屏/定格" —— **已完成（2026-09-12，B2）**
+
+**复现结论（与初版推断的差异，很重要）**
+
+初版推断的方向是"`finished()` 把'缓冲区此刻为空'判成'播放结束'，于是主时钟被冻结"。
+方向对了一半 —— `finished()` 的语义确实有问题，但**真正的触发条件不是时序竞争，
+而是一个确定性的状态污染**：
+
+> `Player::open()` **漏复位 `demuxFinished_` 与 `drainSent_`**。第一个媒体读到 EOF 时
+> 它们被置真；第二次 `open()` 之后，`demuxLoop()` 一进循环就命中
+> `if (demuxFinished_) { sleep(20ms); continue; }` —— **一个包都不读**，
+> 而 `finished()` 因为"缓冲区刚清空"当场为真 → `masterClock()` 返回冻结的 `extPts_`(=0)
+> → `pumpFrame()` 永远取不出帧 → `tex_` 从不创建 = **永久黑屏**，
+> 并且主循环立刻发 `media.eof` / `player.completed`。
+
+所以它是**100% 可复现的**（不是时序偶发），触发条件是"同一进程里换片"——
+即控制通道 `player.open`、插件 `open_media` 这两条路径。App 层状态
+（`lastUploadedIndex_` / `completedFired_`）当时是复位了的，漏的是 Player 层，
+自检又只打开一次媒体，所以长期没被碰到。
+
+**复现方法（已固化成可复跑的两路取证）**
+
+1. 黑盒：起一个隐藏实例 → 认证控制通道 → 采样 `player.stats` → `player.open` 换片 → 继续采样。
+   修复前换片后 `position/master/video_clock/audio_clock` **全部恒为 0.000、`vqueue=0`、`abuf=0`**，
+   日志里「已打开媒体」紧跟着一行「播放结束」。
+2. 白盒：`--selftest` 新增 `reopen_media` 步骤（二次打开同一媒体 + 解码 10 帧断言出画）。
+
+**做了什么**
+
+- `Player::open()` 补齐 `demuxFinished_` / `drainSent_` 复位；并新增
+  `vDrained_` / `aDrained_` 两个**显式排空标志**一起复位
+  （解码线程处理完 drain 空包且 `receive_frame` 返回 EOF 时置真；`flushAfterSeek()` 与
+  `open()` 置假）。
+- `finished()` 从"队列此刻为空"改为**四条件**：demux 读完 ∧ 视频解码器排空（无视频轨则跳过）
+  ∧ 音频解码器排空（无音频轨则跳过）∧ 包队列/帧队列/音频环形缓冲皆空。
+  这样"刚 open、还没喂上第一批数据"与"主线程恰好把帧取空"都不会再被误判成已结束。
+- `--selftest` 新增 `reopen_media` 步骤（放在 `plugin_hot_reload` 之后、
+  统计快照之后，避免覆盖报告里 `playback` 的含义）。
+- **未做**（Step 3）：原计划的"首帧上屏前不推进主时钟 / `openAudio()` 推迟到首帧就绪"
+  **没有做** —— 用控制通道扫了 9 个素材（852x480 → 794 MB，含纯视频 mp4 与纯音频 m4a）
+  **都没有复现出首开黑屏**。没有复现证据就不改行为，避免为了改而改。
+  `masterClock()` 的"未到时长不许冻结"也没加：`finished()` 修对之后，冻结本身就只在
+  真的放完时发生，再加时长钳制反而会让"时长元数据偏大"的素材永远结束不了。
+
+**验收证据（全部实跑）**
+
+| 项 | 结果 |
+|---|---|
+| `reopen_media`（二次打开后解码 10 帧） | 修复前 **FAIL / 0 帧**（故意注释掉两行复位复现）→ 修复后 **PASS / 10 帧** |
+| 控制通道换片时间线 | 修复前 `position=0.000 decoded=0 vqueue=0 abuf=0` 冻结 4.8 s → 修复后 `decoded=17 vqueue=15 abuf=572160` 正常推进 |
+| 换片后日志 | 修复前 `已打开媒体` → `播放结束`（立刻）→ 修复后正常播放 |
+| 播到结尾回归（seek 到 duration−2s 播完） | 仍收到 `media.eof` + `player.completed`，`position=104.874/104.875`，`finished()` 没变坏 |
+| `--selftest` | **11/11 PASS**（连跑 3 次 4.49–4.60 s，稳定） |
+| 短媒体（0.5 s） | `10/10 通过，跳过 1 项`（0.96 s） |
+| 超大窗口边界 | `--size 8192x8192 --selftest` → 11/11 PASS，抓屏按像素上限跳过落盘、像素取证照常 |
+| 门禁与测试 | `verify.py` 18/18；`build.py --unit` 83/83；`--smoke` 两项 PASS；Python 108 OK |
+
+#### P0-3 色彩管理（治"发灰"）
+- **改**：`player.cpp:553-564` 读取 `fr->colorspace / color_range / color_primaries / color_trc`，按 `SWS_CS_ITU709 / SWS_CS_ITU601 / SWS_CS_BT2020` 与 `srcRange` 正确建上下文。
+- **坑（务必注意）**：FFmpeg-devel 明确记录过 —— **range 参数必须在 `sws_init_context` 之前设定**，"只通过 `sws_setColorspaceDetails` 传是不够的"（级联路径上无效）。因此正确姿势是 `sws_alloc_set_opts()` → 设 `srcRange`/`dstRange` → `sws_setColorspaceDetails()` → `sws_init_context()`，而不是像现在这样一次性 `sws_getContext()`。这一点要写进注释。
+- **更优做法**：既然要转 NV12 路线（P0-4），把 YCbCr→RGB 矩阵交给 **SDL3 的 GPU 着色器**（`SDL_SetTextureColorSpace` + `SDL_COLORSPACE_BT709_LIMITED` 等，已确认随包可用），内核只负责"把正确的 colorspace 告诉 SDL"。这样矩阵与范围都不再经过 swscale 的猜测。
+- **验收**：用 `testsrc`/`smptebars` 生成 limited 与 full range 两份参考素材，断言转换后黑位/白位落在预期窗口内（可用 `read_*` 风格的 Python 单测读 PNG 像素）；并提供**抓屏前后对比图**（依赖 P0-1）。
+
+#### P0-4 硬件解码 + NV12/零拷贝 + 上传路径
+- **改**：
+  1. `openVideoCodec()`（`player.cpp:262`）加 `get_format` 回调 + `av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_D3D11VA)`；失败则**自动回退软解**并打 INFO。
+  2. **设备复用**：`SDL_PROP_RENDERER_D3D11_DEVICE_POINTER`（`vendor/sdl3/include/SDL3/SDL_render.h:565`）拿到 SDL 的 `ID3D11Device`，交给 `AVD3D11VADeviceContext.device`；并设 `BindFlags |= D3D11_BIND_SHADER_RESOURCE`（`hwcontext_d3d11va.h:103`）——否则 SDL 用不了这块纹理。**参考实现：SDL3 官方 `test/testffmpeg.c`（D3D11 零拷贝解码+显示），这是官方走过的路。**
+  3. 渲染改为 `SDL_PIXELFORMAT_NV12` 纹理 + `SDL_SetTextureColorSpace`；无硬解时把 `sws_scale` 目标从 RGBA 改成 NV12（带宽降到 1/2.67）。
+  4. GPU 纹理用 `SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER`（`SDL_render.h:814`）直接包外部纹理实现真零拷贝；拿不到就走 `SDL_UpdateTexture` 的 NV12 上传。
+  5. `VIDEO_QUEUE_MAX_FRAMES` 按分辨率自适应（例如 4K 提到 24–32）。
+- **风险（必须实测）**：SDL3 在 2025-12-05 修过一批 "YUV texture updates in the 2D renderer" 的问题（涉及 d3d11/d3d12/gpu/vulkan 四个后端）。**随包的 3.4.16 是否已含该修复需要实测确认**；若不含有两个选择：升级 SDL3，或在 NV12 上传路径上自己写 staging 上传。这是本项第一个必做的验证。
+- **验收**：4K HEVC 素材上 `--selftest` 的 `decoded` 与 `displayed` 接近、`dropped` 显著下降；任务管理器 CPU 占用明显下降；`objdump -p` 确认新增依赖；`fetch_deps.py --check-update` + `gen_third_party_notices.py` 若换 SDL3 版本需重跑。
+
+### P1 —— 能力扩展 + 插件化功能
+
+#### P1-1 真字体 OSD（中文可读）
+- 内核：`Osd::text` 改走真实字形渲染（推荐 **`stb_truetype` 单头文件，public domain**，符合项目"零依赖"倾向；或引入 SDL_ttf 并入库 `THIRD_PARTY_NOTICES.md`）。`PP_OsdApi.text` 的 `utf8` 参数**语义不变**（本来就叫 utf8），去掉 `sanitize()` 的降级逻辑。
+- 交付：中文字体（含 `THIRD_PARTY_NOTICES` 许可声明；注意字体许可也要合规）。
+- **验收**：抓屏里能读到中文路径（P0-1 修完后才有意义）；`text_width` 对 CJK 宽度计算正确，新增 `tests/python` 单测覆盖宽字符。
+
+#### P1-2 鼠标事件通道 + 通用叠加层
+- 内核：`pollEvents()` 增加 `SDL_EVENT_MOUSE_BUTTON_* / MOUSE_MOTION / MOUSE_WHEEL`，构造 `PP_MouseEvent`，`dispatch(PP_TOPIC_UI_MOUSE, ...)`（BAIL 模式**已经登记好了**，`eventbus.cpp:15`）。
+- 新增 `PP_OverlayApi`：让插件能推"位图叠加层"（RGBA 图层 + 位置 + 时间区间），内核负责合成。这是字幕/弹幕/水印/缩略图预览的**通用底座**。
+- **验收**：新增 API 回归用例（`tests/plugin_apitest` 风格），断言"鼠标事件被插件消费后内核不再响应"（BAIL 语义）与"叠加层按 owner 撤销后不残留"。
+
+#### P1-3 字幕（做成插件）
+- 内核提供能力：字幕轨枚举/切换、把字幕包交给解码器、把解码结果（文本或位图）经通用叠加层输出。
+- `subtitles` 原生插件：承载 **libass**（渲染 ASS/SSA 样式）、SRT→ASS 转换、外部字幕加载、字体/样式配置。libass 为 ISC 许可，**与项目 GPL-3.0 兼容**，但必须登记进 `THIRD_PARTY_NOTICES.md` 并重跑生成器。
+- 备选更轻的路线：只用 FFmpeg 自带文本字幕解码（不引 libass），代价是 ASS 特效/样式基本丢失。**建议先做轻路线打通链路，再上 libass**。
+- **验收**：`--selftest` 新增 `subtitle_render` 步骤（含"字幕关闭时该步骤跳过且不计通过"）；抓屏能读出字幕文字（依赖 P0-1/P1-1）。
+
+#### P1-4 多轨与设备选择
+- 内核：枚举 `AVMEDIA_TYPE_AUDIO/SUBTITLE` 全部轨道；`SDL_GetAudioPlaybackDevices`（`SDL_audio.h:547`）接出设备列表与切换；`PP_MediaInfo` 增加轨道数组（**注意：这是 ABI 变更**）。
+- 插件：`track_selector` / `audio_device`。
+- **验收**：RPC 新增方法 `player.tracks` / `player.select_track` / `audio.devices` / `audio.set_device`，同步 `ARCHITECTURE.md` §7.2 方法一览（`rpc-methods-align` 门禁会拦）。
+
+### P2 —— 看得好 / 好用
+
+| 项 | 内容 | 依据/参考 |
+|---|---|---|
+| P2-1 高质量缩放 | 用 **SDL_GPU 自定义 fragment shader** 实现 Lanczos/EWA 上采样与正确下采样（`SDL_gpu.h` 已随包；`SDL_SetDefaultTextureScaleMode` 已可用作过渡方案） | mpv 默认 `lanczos`、high-quality 档 `ewa_lanczossharp`；libplacebo 的缩放档位表 |
+| P2-2 去色带 + 抖动 | GPU 后处理：deband（迭代/阈值/半径/颗粒）+ error-diffusion dither | mpv `deband=yes deband-iterations=4` / `dither=error-diffusion` |
+| P2-3 HDR / 色调映射 | 静态元数据起步（BT.2390），再考虑直方图动态峰值 | D3D11/D3D12 后端本身已支持 HDR 输出与 tone mapping 参数 |
+| P2-4 播放列表 / 媒体库 | JS 插件（Cordis）：队列、播放模式、拖拽载入、记忆播放扩展 | 现有 `02-auto-resume` 可复用 |
+| P2-5 音频 | 倍速变调补偿（现在靠 `SDL_SetAudioStreamFrequencyRatio`，会变调）、音量均一化、声道映射 | mpv `audio-pitch-correction` |
+| P2-6 其他 | 逐帧步进、A-B 循环、旋转/裁边/去交错、缩略图预览（用叠加层能力）、截图带元信息 | MPC-HC/PotPlayer 常规项 |
+
+> **重度备选（需要单独评审）**：把渲染层整体换成 **libplacebo**（mpv `gpu-next` 的内核），一次拿到色彩管理 + 高质量缩放 + deband + HDR tone mapping。代价：新增重型依赖（依赖 Vulkan）、构建复杂度大、与 SDL 渲染器的边界要重新设计。**建议放到 P2 之后，等 P0/P1 落地、看清楚瓶颈再决定**，不要现在动。
+
+---
+
+## 5. 验收标准与验证命令汇总
+
+| 项 | 验收标准（可执行） | 命令 |
+|---|---|---|
+| P0-1 | 抓屏直方图中背景色占比 < 15%；纹理禁用时该检查报红 | `build.py --smoke` → `pluginplayer selftest` + 新增 Python 单测读 BMP |
+| P0-2 | 构造用例：修复前 FAIL / 修复后 PASS，并固化进 `tests/` | 新增 `tests/` 回归 + `--selftest` |
+| P0-3 | limited/full 参考素材的黑白位落在预期窗口 | 新增 Python 单测（读 PNG 像素）+ 对比图 |
+| P0-4 | 4K HEVC：`decoded≈displayed`、`dropped` 下降；CPU 占用下降 | `--selftest` + 任务管理器 + `objdump -p` |
+| P1-1 | 抓屏可读出中文 | `--selftest` 抓屏 + Python 断言 |
+| P1-2 | 鼠标 BAIL 语义与叠加层撤销无残留 | `build.py --apitest` 扩展 |
+| P1-3 | `subtitle_render` 步骤通过；关字幕时记 SKIP 不计通过 | `--selftest` |
+| P1-4 | 新 RPC 方法可调用 | `tests/cli_check.py` 扩展 + `tools/rpc_client.py` |
+| 全部 | 门禁与单测不回归 | `tools/verify.py` → `tools/verify.py --selfcheck` → `build.py --unit` → `python -m unittest discover -s tests\python` → `ci.bat` |
+
+---
+
+## 6. 必须同步修改的「门禁与文档」清单（漏了 `verify.py` 就会红）
+
+这个仓库的铁律是"两处必须相等的约束写成可执行检查"。因此每一项改动都带一串连带修改：
+
+| 改动 | 连带必须同步 |
+|---|---|
+| 新增/改 `PP_HostApi` / `PP_OsdApi` / `PP_MediaInfo` 字段 | `PP_ABI_VERSION` **2 → 3**（`player_plugin.h:78`）；重编全部 5 个原生插件；同步 `docs/PLUGIN_GUIDE.md`、`examples/hello_plugin`、`docs/ARCHITECTURE.md` §8；新增 `versions-align` 对 ABI 版本的断言 |
+| 新增插件 / 新增命令 | `plugin-command-count`（现 15）、`native-plugin-set`（现 5）、`js-plugin-count`（现 3）三处门禁的期望值；`README.md`「内置插件」表；`docs/CLI.md` |
+| 新增 RPC 方法 | `rpc-methods-align`（现 19 个）+ `docs/ARCHITECTURE.md` §7.2 方法一览 |
+| 新增 CLI 命令 | `cli-commands-align`（现 25 个）+ `README.md` + `docs/CLI.md` |
+| 新增数值边界 | `arg-bounds-align`（现 13 项）+ `tools/pp_cli.py` |
+| 新增/升级依赖（SDL3、libass、stb、字体） | `THIRD_PARTY_NOTICES.md`（**生成物，必须重跑 `tools/gen_third_party_notices.py`**）；`versions-align`；`DEPS_SHA256`；`fetch_deps.py` |
+| 发布载荷变化（新增 DLL/字体） | `release-payload`（现 **17 个文件 / 127 MB**）+ `README.md` 同口径表述 |
+| 新增文档 | `docs-index`（现 4 份）—— **本文件若移入 `docs/`，必须同时登记进 `docs/README.md`** |
+| 新增测试 | `tests/python/test_verify.py` 里有断言要求"每条新门禁必须配套 `--selfcheck` 破坏用例" |
+| 目录结构变化 | `readme-tree`（现 56 个条目） |
+
+---
+
+## 7. 风险与「必须实跑验证」清单（不许"看起来没问题"）
+
+1. **SDL3 3.4.16 的 NV12 上传路径是否已含 2025-12-05 那批修复** —— 未验证。第一件事就是写一个最小程序验证 NV12 纹理上传+显示。
+2. **随包 SDL3.dll 的着色器能力**（HDR/tone mapping 扩展、SDL_GPU 后端可用性）—— 需在目标机器实测，不能只看头文件。
+3. **本机 grep 结论是"源码级"证据，不等于"运行时"证据**：例如"引擎永远走 D3D11"这条是从 SDL 源码 driver 优先级推出的（Windows 上 `D3D11_RenderDriver` 排第一），应在运行时用 `SDL_GetCurrentRenderDriver()` 打印确认，并在启动日志里固化这一行。**（这条本身就是个小改进项：现在日志没打印实际渲染后端。）**
+4. ~~**`finished()` 冻结假设尚未复现**（§2.1-B）—— 必须复现后再修，否则可能改错地方。~~
+   **已解决（B2）**：复现了，而且真因是确定性缺陷（`open()` 漏复位两个标志），
+   不是竞争；同时 `finished()` 的语义也确实被修严了（四条件）。回归用例已固化。
+5. **ABI v3 是一次全插件重编**，`plugin-manifest.sha256` 也会全变；`--release` 出来的口径（文件数/体积）会变，README 与门禁都要跟着改。
+6. **libass 的依赖链**（freetype / harfbuzz / fribidi）在 MinGW 下的可用性与体积需评估；若不顺，退回"FFmpeg 自带文本字幕"的轻路线。
+7. **中文字体许可**：随包字体必须许可清晰并登记，不能随手塞一个微软雅黑。
+8. **操作提示（本次踩到）**：用 PowerShell 的 `Start-Process -ArgumentList` 调用本播放器会**破坏中文路径**（实测 `open_media` 直接 FAIL）。写自动化脚本请用调用运算符 `&` 或 `cmd /c`，否则会得到假失败。
+
+---
+
+## 8. 建议执行批次
+
+| 批次 | 内容 | 门禁要求 |
+|---|---|---|
+| **B1** | P0-1（证据链修复 + 加严断言）→ 立刻给出"修复前/修复后"对比图 | `verify.py` + `verify.py --selfcheck` + 单测 |
+| **B2** | ~~P0-2 复现 → 修复 → 固化回归用例~~ **已完成 2026-09-12** | `verify.py` 18/18 + `--selftest` 11/11 + 控制通道两路取证 |
+| **B3** | P0-3 色彩管理（先做 NV12 + SDL colorspace 路线，与 B4 合并更省事） | 同上 + 像素单测 |
+| **B4** | P0-4 硬解 + 零拷贝（含 SDL3 NV12 前置验证） | 同上 + 4K 实测数据 |
+| **B5** | ABI v3 一次性落地（把 P1-1/P1-2/P1-4 需要的新能力一起加，避免多次重编全部插件） | `verify.py --selfcheck` + `--apitest` |
+| **B6** | P1-1 真字体 OSD / P1-2 鼠标通道 / P1-4 多轨与设备 | 同上 |
+| **B7** | P1-3 字幕插件（先轻路线打通，再上 libass） | 同上 + 字幕用例 |
+| **B8** | P2 画质链（GPU 着色器缩放 / deband / dither）与播放列表等插件 | 同上 + 性能对比 |
+
+**每批次结束都要**：`tools/verify.py` → `tools/verify.py --selfcheck` → `build.py --unit` → `python -m unittest discover -s tests\python` → `ci.bat`，并把"改了/为什么/怎么验证"写进 README 的验证记录；**未修项登记进「已知限制」并写明为什么不修**（`AGENTS.md`「汇报要求」）。
+
+---
+
+## 9. 一句话总结
+
+> 这个仓库的**工程纪律是好的**（门禁、自检、ABI 规则都在），问题在于**它一直在用一张不含画面的"证据图"证明自己画得出来**，并且**画质链路只做到"能播"**。
+> 所以顺序必须是：**先把眼睛修好（P0-1/P0-2），再把画面修对（P0-3/P0-4），最后才是好用（P1/P2）** —— 同时严守"内核给能力、功能做插件"这条线。
