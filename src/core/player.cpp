@@ -1,0 +1,965 @@
+/* player.cpp — 播放内核实现 */
+#include "player.h"
+#include "util.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+extern "C" {
+#include <libavutil/time.h>
+#include <libavutil/error.h>
+#include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+}
+
+namespace pp {
+
+static const int64_t VIDEO_QUEUE_MAX_FRAMES = 16;
+static const int64_t VIDEO_PACKET_MAX_BYTES = 24 * 1024 * 1024;
+static const int64_t AUDIO_PACKET_MAX_BYTES = 8 * 1024 * 1024;
+
+/* ======================= PacketQueue ======================= */
+
+void PacketQueue::abort() {
+    std::lock_guard<std::mutex> lk(mu_);
+    abort_ = true;
+    cv_.notify_all();
+    cvSpace_.notify_all();
+}
+
+void PacketQueue::restart() {
+    std::lock_guard<std::mutex> lk(mu_);
+    abort_ = false;
+    cv_.notify_all();
+}
+
+void PacketQueue::flush() {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (AVPacket* p : q_) av_packet_free(&p);
+    q_.clear();
+    pktSerials_.clear();
+    bytes_ = 0;
+    serial_++;
+    cvSpace_.notify_all();
+}
+
+void PacketQueue::wakeAll() {
+    std::lock_guard<std::mutex> lk(mu_);
+    cv_.notify_all();
+    cvSpace_.notify_all();
+}
+
+int PacketQueue::put(AVPacket* pkt) {
+    std::unique_lock<std::mutex> lk(mu_);
+    if (abort_) {
+        lk.unlock();
+        av_packet_free(&pkt);
+        return -1;
+    }
+    q_.push_back(pkt);
+    pktSerials_.push_back(serial_);
+    bytes_ += pkt->size;
+    cv_.notify_one();
+    return 0;
+}
+
+int PacketQueue::get(AVPacket* out, int block, int* serial) {
+    std::unique_lock<std::mutex> lk(mu_);
+    for (;;) {
+        if (abort_) return -1;
+        if (!q_.empty()) {
+            AVPacket* p = q_.front();
+            q_.pop_front();
+            int s = pktSerials_.front();
+            pktSerials_.pop_front();
+            bytes_ -= p->size;
+            av_packet_move_ref(out, p);
+            av_packet_free(&p);
+            if (serial) *serial = s;   /* 该包入队时的序号 */
+            cvSpace_.notify_one();
+            return 1;
+        }
+        if (!block) return 0;
+        cv_.wait_for(lk, std::chrono::milliseconds(50));
+    }
+}
+
+int PacketQueue::serial() const { std::lock_guard<std::mutex> lk(mu_); return serial_; }
+bool PacketQueue::aborted() const { std::lock_guard<std::mutex> lk(mu_); return abort_; }
+size_t PacketQueue::count() const { std::lock_guard<std::mutex> lk(mu_); return q_.size(); }
+int64_t PacketQueue::bytes() const { std::lock_guard<std::mutex> lk(mu_); return bytes_; }
+
+/* ======================= AudioRing ======================= */
+
+void AudioRing::init(size_t capacity) {
+    std::lock_guard<std::mutex> lk(mu_);
+    cap_ = capacity;
+    buf_.assign(capacity, 0);
+    r_ = w_ = size_ = 0;
+    abort_ = false;
+}
+
+void AudioRing::clear() {
+    std::lock_guard<std::mutex> lk(mu_);
+    r_ = w_ = size_ = 0;
+    cv_.notify_all();
+}
+
+size_t AudioRing::write(const uint8_t* data, size_t n) {
+    std::lock_guard<std::mutex> lk(mu_);
+    size_t room = cap_ - size_;
+    size_t k = std::min(n, room);
+    for (size_t i = 0; i < k; ++i) {
+        buf_[w_] = data[i];
+        w_ = (w_ + 1) % cap_;
+    }
+    size_ += k;
+    if (k) cv_.notify_all();
+    return k;
+}
+
+size_t AudioRing::read(uint8_t* data, size_t n) {
+    std::lock_guard<std::mutex> lk(mu_);
+    size_t k = std::min(n, size_);
+    for (size_t i = 0; i < k; ++i) {
+        data[i] = buf_[r_];
+        r_ = (r_ + 1) % cap_;
+    }
+    size_ -= k;
+    if (k) cv_.notify_all();
+    return k;
+}
+
+size_t AudioRing::avail() const { std::lock_guard<std::mutex> lk(mu_); return size_; }
+size_t AudioRing::space() const { std::lock_guard<std::mutex> lk(mu_); return cap_ - size_; }
+size_t AudioRing::capacity() const { std::lock_guard<std::mutex> lk(mu_); return cap_; }
+
+void AudioRing::wake() {
+    std::lock_guard<std::mutex> lk(mu_);
+    cv_.notify_all();
+}
+
+bool AudioRing::waitData(int timeoutMs) {
+    std::unique_lock<std::mutex> lk(mu_);
+    if (size_ > 0 || abort_) return size_ > 0;
+    cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs));
+    return size_ > 0;
+}
+
+void AudioRing::setAbort(bool a) {
+    std::lock_guard<std::mutex> lk(mu_);
+    abort_ = a;
+    cv_.notify_all();
+}
+
+/* ======================= Player ======================= */
+
+Player::Player() {}
+Player::~Player() { close(); }
+
+int Player::interruptCb(void* opaque) {
+    Player* p = (Player*)opaque;
+    return (p->abort_.load() || p->seekReq_.load()) ? 1 : 0;
+}
+
+bool Player::open(const std::string& path) {
+    close();
+    path_ = path;
+
+    int ret = avformat_open_input(&fmt_, path.c_str(), nullptr, nullptr);
+    if (ret < 0) {
+        char err[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(ret, err, sizeof(err));
+        PP_ERROR("avformat_open_input 失败: %s (%s)", path.c_str(), err);
+        fmt_ = nullptr;
+        return false;
+    }
+    fmt_->interrupt_callback.callback = &Player::interruptCb;
+    fmt_->interrupt_callback.opaque = this;
+
+    if (avformat_find_stream_info(fmt_, nullptr) < 0) {
+        PP_ERROR("avformat_find_stream_info 失败");
+        close();
+        return false;
+    }
+
+    vStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    aStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (vStream_ < 0 && aStream_ < 0) {
+        PP_ERROR("未找到可解码的音视频流: %s", path.c_str());
+        close();
+        return false;
+    }
+
+    if (vStream_ >= 0 && !openVideoCodec(vStream_)) { close(); return false; }
+    if (aStream_ >= 0 && !openAudioCodec(aStream_)) { close(); return false; }
+
+    duration_ = (fmt_->duration != AV_NOPTS_VALUE)
+                    ? (double)fmt_->duration / AV_TIME_BASE
+                    : 0.0;
+    bitrate_ = fmt_->bit_rate;
+
+    /* 无音频时，把输出参数设成默认值，避免 0 除 */
+    if (aStream_ < 0) {
+        outSampleRate_ = 48000;
+        outChannels_ = 2;
+    }
+    bytesPerSec_ = outSampleRate_ * outChannels_ * 2;
+
+    ring_.init((size_t)bytesPerSec_ * 3); /* 3 秒缓冲 */
+    ring_.setAbort(false);
+
+    {
+        std::lock_guard<std::mutex> lk(clockMu_);
+        audioBasePending_ = true;
+        audioChunkPts_ = 0.0;
+    }
+    audioWrittenBytes_ = 0;
+    audioConsumedBytes_ = 0;
+    audioLeadBytes_ = 0;
+    dropBefore_ = 0.0;
+    lastAudioClock_ = 0.0;
+    lastAudioTick_ = 0.0;
+    nextAudioPts_ = 0.0;
+    extPts_ = 0.0;
+    extLastTick_ = (double)SDL_GetTicks() / 1000.0;
+    paused_ = false;
+    eof_ = false;
+    abort_ = false;
+    seekReq_ = false;
+    serial_ = 0;
+    frameIndex_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(statMu_);
+        decodedFrames_ = displayedFrames_ = droppedFrames_ = 0;
+        fpsWindowStart_ = 0.0;
+        fpsWindowCount_ = 0;
+        measuredFps_ = 0.0;
+    }
+    {
+        std::lock_guard<std::mutex> lk(curMu_);
+        current_.reset();
+    }
+
+    vq_.restart();
+    aq_.restart();
+    vq_.flush();
+    aq_.flush();
+
+    opened_ = true;
+
+    demuxTh_ = std::thread(&Player::demuxLoop, this);
+    if (vStream_ >= 0) vdecTh_ = std::thread(&Player::videoDecodeLoop, this);
+    if (aStream_ >= 0) adecTh_ = std::thread(&Player::audioDecodeLoop, this);
+
+    PP_INFO("已打开媒体: %s", path.c_str());
+    return true;
+}
+
+bool Player::openVideoCodec(int idx) {
+    AVStream* st = fmt_->streams[idx];
+    const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec) {
+        PP_ERROR("找不到视频解码器 (codec_id=%d)", (int)st->codecpar->codec_id);
+        return false;
+    }
+    vCtx_ = avcodec_alloc_context3(codec);
+    if (!vCtx_) return false;
+    if (avcodec_parameters_to_context(vCtx_, st->codecpar) < 0) return false;
+    vCtx_->pkt_timebase = st->time_base;
+    if (avcodec_open2(vCtx_, codec, nullptr) < 0) {
+        PP_ERROR("avcodec_open2(视频) 失败");
+        return false;
+    }
+    srcW_ = vCtx_->width;
+    srcH_ = vCtx_->height;
+    sar_ = vCtx_->sample_aspect_ratio;
+    if (sar_.num <= 0 || sar_.den <= 0) sar_ = AVRational{1, 1};
+
+    AVRational fr = st->avg_frame_rate;
+    if (fr.num <= 0 || fr.den <= 0) fr = st->r_frame_rate;
+    fps_ = (fr.num > 0 && fr.den > 0) ? av_q2d(fr) : 0.0;
+    return true;
+}
+
+bool Player::openAudioCodec(int idx) {
+    AVStream* st = fmt_->streams[idx];
+    const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec) {
+        PP_ERROR("找不到音频解码器 (codec_id=%d)", (int)st->codecpar->codec_id);
+        return false;
+    }
+    aCtx_ = avcodec_alloc_context3(codec);
+    if (!aCtx_) return false;
+    if (avcodec_parameters_to_context(aCtx_, st->codecpar) < 0) return false;
+    aCtx_->pkt_timebase = st->time_base;
+    if (avcodec_open2(aCtx_, codec, nullptr) < 0) {
+        PP_ERROR("avcodec_open2(音频) 失败");
+        return false;
+    }
+    outSampleRate_ = aCtx_->sample_rate > 0 ? aCtx_->sample_rate : 48000;
+    if (outSampleRate_ < 8000) outSampleRate_ = 8000;
+    if (outSampleRate_ > 192000) outSampleRate_ = 192000;
+    int ch = aCtx_->ch_layout.nb_channels > 0 ? aCtx_->ch_layout.nb_channels : 2;
+    outChannels_ = ch >= 2 ? 2 : 1;
+    return true;
+}
+
+void Player::close() {
+    if (!opened_ && !fmt_) return;
+    abort_ = true;
+    seekReq_ = false;
+    vq_.abort();
+    aq_.abort();
+    ring_.setAbort(true);
+    ring_.wake();
+    vfCv_.notify_all();
+    {
+        std::lock_guard<std::mutex> lk(clockMu_);
+    }
+
+    if (demuxTh_.joinable()) demuxTh_.join();
+    if (vdecTh_.joinable())  vdecTh_.join();
+    if (adecTh_.joinable())  adecTh_.join();
+
+    vq_.flush();
+    aq_.flush();
+
+    {
+        std::lock_guard<std::mutex> lk(vfMu_);
+        vframes_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(curMu_);
+        current_.reset();
+    }
+    ring_.clear();
+
+    if (sws_) { sws_freeContext(sws_); sws_ = nullptr; }
+    if (swr_) { swr_free(&swr_); swr_ = nullptr; }
+    if (vCtx_) avcodec_free_context(&vCtx_);
+    if (aCtx_) avcodec_free_context(&aCtx_);
+    if (fmt_)  avformat_close_input(&fmt_);
+
+    swsW_ = swsH_ = 0;
+    swsFmt_ = -1;
+    vStream_ = aStream_ = -1;
+    opened_ = false;
+    eof_ = false;
+    PP_INFO("已关闭媒体");
+}
+
+/* ---------------- demux ---------------- */
+
+void Player::demuxLoop() {
+    while (!abort_) {
+        if (seekReq_.load()) {
+            double target = 0;
+            {
+                std::lock_guard<std::mutex> lk(seekMu_);
+                target = seekTarget_;
+                seekReq_ = false;
+            }
+            flushAfterSeek(target);
+            drainSent_ = false;
+            demuxFinished_ = false;
+            eof_ = false;
+
+            int64_t ts = (int64_t)(target * AV_TIME_BASE);
+            int ret = av_seek_frame(fmt_, -1, ts, AVSEEK_FLAG_BACKWARD);
+            if (ret < 0) {
+                AVStream* st = (vStream_ >= 0) ? fmt_->streams[vStream_]
+                                               : fmt_->streams[aStream_];
+                int64_t sts = av_rescale_q(ts, AV_TIME_BASE_Q, st->time_base);
+                ret = av_seek_frame(fmt_, -1, sts, AVSEEK_FLAG_BACKWARD);
+            }
+            PP_INFO("seek -> %.3f s (ret=%d)", target, ret);
+            /* 清掉 seek 期间可能残留的 EAGAIN 状态 */
+            continue;
+        }
+
+        /* EOF 之后停在这里等 seek / abort；不再反复读文件 */
+        if (demuxFinished_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        if (vq_.bytes() > VIDEO_PACKET_MAX_BYTES || aq_.bytes() > AUDIO_PACKET_MAX_BYTES) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        /* 每个包都新分配：put() 之后所有权已交给队列，绝不能再复用同一个 AVPacket，
+         * 否则 av_read_frame 会覆写解码线程正在读的内存（曾导致 h264 解析出错 + 堆损坏）。 */
+        AVPacket* pkt = av_packet_alloc();
+        if (!pkt) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
+
+        int ret = av_read_frame(fmt_, pkt);
+        if (ret < 0) {
+            av_packet_free(&pkt);
+            if (abort_) break;
+            if (ret == AVERROR_EOF) {
+                if (!drainSent_) {
+                    /* 送空包让解码器把残留帧吐完 */
+                    if (vStream_ >= 0) { AVPacket* e = av_packet_alloc(); vq_.put(e); }
+                    if (aStream_ >= 0) { AVPacket* e = av_packet_alloc(); aq_.put(e); }
+                    drainSent_ = true;
+                    demuxFinished_ = true;
+                    eof_ = true;
+                    PP_INFO("demux 到达文件末尾");
+                }
+                continue;
+            }
+            char err[AV_ERROR_MAX_STRING_SIZE] = {0};
+            av_strerror(ret, err, sizeof(err));
+            PP_WARN("av_read_frame 出错: %s", err);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        if (pkt->stream_index == vStream_) {
+            vq_.put(pkt);
+        } else if (pkt->stream_index == aStream_) {
+            aq_.put(pkt);
+        } else {
+            av_packet_free(&pkt);
+        }
+    }
+}
+
+bool Player::finished() const {
+    if (!opened_) return false;
+    if (!demuxFinished_.load()) return false;
+    if (vq_.count() > 0 || aq_.count() > 0) return false;
+    {
+        std::lock_guard<std::mutex> lk(vfMu_);
+        if (!vframes_.empty()) return false;
+    }
+    if (aStream_ >= 0 && ring_.avail() > 0) return false;
+    return true;
+}
+
+void Player::flushAfterSeek(double target) {
+    /* 只清队列/缓冲，不碰 AVCodecContext：
+     * avcodec_flush_buffers 必须由**拥有该上下文的解码线程**自己调用，
+     * 否则会与正在进行的 avcodec_send/receive_frame 并发访问同一个 context
+     * （FFmpeg codec context 非线程安全）—— 这是之前 -O2 下偶发段错误的根因。
+     * 解码线程通过「包序号变化」检测到 seek 后自行 flush。 */
+    vq_.flush();
+    aq_.flush();
+    {
+        std::lock_guard<std::mutex> lk(vfMu_);
+        vframes_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(curMu_);
+        current_.reset();
+    }
+    ring_.clear();
+    if (onAudioFlush_) onAudioFlush_();
+
+    serial_ = serial_.load() + 1;
+    eof_ = false;
+    nextAudioPts_ = target;
+    dropBefore_ = target > 0.10 ? target - 0.10 : 0.0;
+    {
+        std::lock_guard<std::mutex> lk(clockMu_);
+        audioBasePending_ = true;
+        audioChunkPts_ = target;
+    }
+    audioWrittenBytes_ = 0;
+    audioConsumedBytes_ = 0;
+    audioLeadBytes_ = 0;
+    extPts_ = target;
+    extLastTick_ = (double)SDL_GetTicks() / 1000.0;
+}
+
+/* ---------------- 视频解码 ---------------- */
+
+void Player::videoDecodeLoop() {
+    AVStream* st = fmt_->streams[vStream_];
+    AVRational tb = st->time_base;
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* fr = av_frame_alloc();
+    double nextPts = 0.0;
+    int lastQSerial = -1;   /* 上一个已处理的包序号，用于检测 seek 并自行 flush */
+
+    while (!abort_) {
+        int serial = 0;
+        int r = vq_.get(pkt, 1, &serial);
+        if (r < 0) break;
+        if (r == 0) continue;
+
+        /* 序号变化 = 发生过 seek/flush：由本线程安全地重置解码器 */
+        if (serial != lastQSerial) {
+            avcodec_flush_buffers(vCtx_);
+            lastQSerial = serial;
+        }
+        if (pkt->data == nullptr) {
+            avcodec_send_packet(vCtx_, nullptr);
+        } else {
+            int sret = avcodec_send_packet(vCtx_, pkt);
+            av_packet_unref(pkt);
+            if (sret < 0 && sret != AVERROR(EAGAIN)) continue;
+        }
+
+        for (;;) {
+            int rret = avcodec_receive_frame(vCtx_, fr);
+            if (rret == AVERROR(EAGAIN)) break;
+            if (rret == AVERROR_EOF) break;
+            if (rret < 0) break;
+
+            /* seek/flush 之后，队列序号会递增；在途的旧包解出来的帧一律作废，
+             * 否则会把 seek 前的画面/时间戳混进新时间轴。 */
+            if (serial != vq_.serial()) { av_frame_unref(fr); continue; }
+            double pts = nextPts;
+            if (fr->best_effort_timestamp != AV_NOPTS_VALUE) {
+                pts = (double)fr->best_effort_timestamp * av_q2d(tb);
+            }
+            double dur = (fr->duration > 0) ? (double)fr->duration * av_q2d(tb)
+                                            : (fps_ > 0 ? 1.0 / fps_ : 1.0 / 30.0);
+            nextPts = pts + dur;
+
+            /* seek 后丢弃目标点之前的画面，保证跳到用户指定位置 */
+            if (pts < dropBefore_.load()) { av_frame_unref(fr); continue; }
+
+            /* 目标尺寸：按 coded 尺寸做像素格式转换，方向比交给渲染层 */
+            int w = fr->width > 0 ? fr->width : srcW_;
+            int h = fr->height > 0 ? fr->height : srcH_;
+            if (w <= 0 || h <= 0) { av_frame_unref(fr); continue; }
+
+            if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != fr->format) {
+                if (sws_) sws_freeContext(sws_);
+                sws_ = sws_getContext(w, h, (AVPixelFormat)fr->format,
+                                      w, h, AV_PIX_FMT_RGBA,
+                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
+                swsW_ = w; swsH_ = h; swsFmt_ = fr->format;
+                if (!sws_) {
+                    PP_ERROR("sws_getContext 失败 (fmt=%d)", fr->format);
+                    av_frame_unref(fr);
+                    continue;
+                }
+            }
+
+            auto vf = std::make_shared<VideoFrame>();
+            vf->w = w;
+            vf->h = h;
+            vf->pitch = w * 4;
+            vf->rgba.resize((size_t)vf->pitch * h);
+            vf->pts = pts;
+            vf->duration = dur;
+            vf->serial = serial;
+            vf->index = frameIndex_.fetch_add(1);
+
+            uint8_t* dst[4] = {vf->rgba.data(), nullptr, nullptr, nullptr};
+            int dstLs[4] = {vf->pitch, 0, 0, 0};
+            sws_scale(sws_, fr->data, fr->linesize, 0, h, dst, dstLs);
+            av_frame_unref(fr);
+
+            /* 入队；队列满则等待（seek/abort 时立刻放弃） */
+            {
+                std::unique_lock<std::mutex> lk(vfMu_);
+                vfCv_.wait_for(lk, std::chrono::milliseconds(50), [&] {
+                    return abort_.load() || seekReq_.load() ||
+                           (int64_t)vframes_.size() < VIDEO_QUEUE_MAX_FRAMES;
+                });
+                if (abort_.load() || seekReq_.load()) break;
+                if (serial != vq_.serial()) break;   /* flush 作废 */
+                vframes_.push_back(vf);
+            }
+            {
+                std::lock_guard<std::mutex> lk(statMu_);
+                decodedFrames_++;
+            }
+        }
+    }
+    av_frame_free(&fr);
+    av_packet_free(&pkt);
+}
+
+/* ---------------- 音频解码 ---------------- */
+
+void Player::audioDecodeLoop() {
+    AVStream* st = fmt_->streams[aStream_];
+    AVRational tb = st->time_base;
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* fr = av_frame_alloc();
+    std::vector<uint8_t> outBuf;
+    double nextPts = 0.0;
+    int lastQSerial = -1;
+
+    while (!abort_) {
+        int serial = 0;
+        int r = aq_.get(pkt, 1, &serial);
+        if (r < 0) break;
+        if (r == 0) continue;
+
+        /* 序号变化 = 发生过 seek/flush：由本线程安全地重置解码器与重采样器 */
+        if (serial != lastQSerial) {
+            avcodec_flush_buffers(aCtx_);
+            if (swr_) swr_init(swr_);
+            lastQSerial = serial;
+        }
+        if (pkt->data == nullptr) {
+            avcodec_send_packet(aCtx_, nullptr);
+        } else {
+            int sret = avcodec_send_packet(aCtx_, pkt);
+            av_packet_unref(pkt);
+            if (sret < 0 && sret != AVERROR(EAGAIN)) continue;
+        }
+
+        for (;;) {
+            int rret = avcodec_receive_frame(aCtx_, fr);
+            if (rret == AVERROR(EAGAIN)) break;
+            if (rret == AVERROR_EOF) break;
+            if (rret < 0) break;
+
+            /* 同视频：seek 后作废在途旧包，避免把旧时间戳当成新基准 */
+            if (serial != aq_.serial()) { av_frame_unref(fr); continue; }
+
+            double pts = nextPts;
+            if (fr->best_effort_timestamp != AV_NOPTS_VALUE) {
+                pts = (double)fr->best_effort_timestamp * av_q2d(tb);
+            }
+
+            /* seek 后丢弃目标点之前的音频，避免把旧声音灌进环形缓冲 */
+            if (pts < dropBefore_.load()) { av_frame_unref(fr); continue; }
+
+            /* 输入布局 */
+            AVChannelLayout inLayout{};
+            if (fr->ch_layout.nb_channels > 0) {
+                av_channel_layout_copy(&inLayout, &fr->ch_layout);
+            } else {
+                av_channel_layout_default(&inLayout, outChannels_);
+            }
+            AVChannelLayout outLayout{};
+            av_channel_layout_default(&outLayout, outChannels_);
+
+            if (!swr_) {
+                if (swr_alloc_set_opts2(&swr_, &outLayout, AV_SAMPLE_FMT_S16, outSampleRate_,
+                                        &inLayout, (AVSampleFormat)fr->format,
+                                        fr->sample_rate ? fr->sample_rate : outSampleRate_,
+                                        0, nullptr) < 0 || swr_init(swr_) < 0) {
+                    PP_ERROR("swr 初始化失败");
+                    swr_free(&swr_);
+                    av_channel_layout_uninit(&inLayout);
+                    av_channel_layout_uninit(&outLayout);
+                    av_frame_unref(fr);
+                    continue;
+                }
+            }
+
+            int maxOut = (int)av_rescale_rnd(swr_get_delay(swr_, fr->sample_rate) + fr->nb_samples,
+                                             outSampleRate_, fr->sample_rate, AV_ROUND_UP) + 64;
+            size_t need = (size_t)maxOut * outChannels_ * 2;
+            if (outBuf.size() < need) outBuf.resize(need);
+
+            uint8_t* op = outBuf.data();
+            int got = swr_convert(swr_, &op, maxOut,
+                                  (const uint8_t* const*)fr->extended_data, fr->nb_samples);
+            av_channel_layout_uninit(&inLayout);
+            av_channel_layout_uninit(&outLayout);
+            av_frame_unref(fr);
+            if (got <= 0) continue;
+
+            size_t bytes = (size_t)got * outChannels_ * 2;
+
+            /* 环形缓冲写入（满则等待） */
+            size_t off = 0;
+            while (off < bytes && !abort_ && !seekReq_.load()) {
+                size_t n = ring_.write(outBuf.data() + off, bytes - off);
+                if (n == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    continue;
+                }
+                off += n;
+            }
+            if (off < bytes) continue;
+            if (serial != aq_.serial()) continue;   /* 写入途中被 flush 作废 */
+
+            double chunkDur = (double)got / (double)outSampleRate_;
+            {
+                std::lock_guard<std::mutex> lk(clockMu_);
+                if (audioBasePending_) {
+                    audioChunkPts_ = pts;
+                    audioWrittenBytes_ = 0;
+                    audioConsumedBytes_ = 0;
+                    audioBasePending_ = false;
+                }
+            }
+            audioWrittenBytes_ += (int64_t)bytes;
+            nextPts = pts + chunkDur;
+
+            /* 音频快照（频谱插件用） */
+            {
+                const int16_t* s = (const int16_t*)outBuf.data();
+                int n = got * outChannels_;
+                std::lock_guard<std::mutex> lk(tapMu_);
+                if ((int)audioTap_.size() < 8192) audioTap_.assign(8192, 0.0f);
+                for (int i = 0; i < n; i++) {
+                    audioTap_[audioTapWrite_] = (float)s[i] / 32768.0f;
+                    audioTapWrite_ = (audioTapWrite_ + 1) % (int)audioTap_.size();
+                    if (audioTapCount_ < (int)audioTap_.size()) audioTapCount_++;
+                }
+            }
+        }
+    }
+    av_frame_free(&fr);
+    av_packet_free(&pkt);
+}
+
+/* ---------------- 时钟 ---------------- */
+
+double Player::audioClockValue() const {
+    if (!audioActive_) return 0.0;
+    std::lock_guard<std::mutex> lk(clockMu_);
+    int64_t consumed = audioConsumedBytes_.load() - audioLeadBytes_.load();
+    if (consumed < 0) consumed = 0;
+    double t = audioChunkPts_ + (double)consumed / (double)(bytesPerSec_ > 0 ? bytesPerSec_ : 1);
+    /* 已写入但还没播完的数据不能算进去 */
+    int64_t written = audioWrittenBytes_.load();
+    double maxT = audioChunkPts_ + (double)written / (double)(bytesPerSec_ > 0 ? bytesPerSec_ : 1);
+    if (t > maxT) t = maxT;
+    return t;
+}
+
+double Player::videoClockValue() {
+    std::lock_guard<std::mutex> lk(curMu_);
+    return current_ ? current_->pts : 0.0;
+}
+
+double Player::masterClock() {
+    double now = (double)SDL_GetTicks() / 1000.0;
+
+    /* 播放结束（demux 读完且缓冲排空）后不再推进时钟，避免 position 超过时长 */
+    if (finished()) {
+        extLastTick_ = now;
+        if (duration_ > 0 && extPts_ > duration_) extPts_ = duration_;
+        return extPts_;
+    }
+
+    if (paused_.load()) {
+        extLastTick_ = now;
+        if (audioActive_ && audioWrittenBytes_.load() > 0) return audioClockValue();
+        return extPts_;
+    }
+    double sp = speed_.load();
+    if (sp <= 0.0) sp = 1.0;
+
+    if (audioActive_ && audioWrittenBytes_.load() > 0) {
+        double a = audioClockValue();
+        if (a > lastAudioClock_ + 1e-9) {
+            lastAudioClock_ = a;
+            lastAudioTick_ = now;
+        }
+        /* 只有音频时钟确实在推进时才拿它当主时钟。
+         * 否则（设备已打开但不出声，例如默认设备是未连接蓝牙耳机、
+         * 或音频回调被系统挂起）退回墙钟，避免整个播放卡在 0 秒。 */
+        if (now - lastAudioTick_ < 0.35) {
+            extPts_ = a;            /* 让墙钟跟随音频，切换时无跳变 */
+            extLastTick_ = now;
+            return a;
+        }
+    }
+    extPts_ += (now - extLastTick_) * sp;
+    extLastTick_ = now;
+    return extPts_;
+}
+
+/* ---------------- 主线程帧泵 ---------------- */
+
+bool Player::pumpFrame() {
+    double master = masterClock();
+    std::shared_ptr<VideoFrame> pick;
+    int dropped = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(vfMu_);
+        while (!vframes_.empty() && vframes_.front()->pts <= master + 0.004) {
+            if (pick) dropped++;
+            pick = vframes_.front();
+            vframes_.pop_front();
+        }
+    }
+    vfCv_.notify_one();
+
+    if (!pick) {
+        /* EOF 判定：demux 结束 + 队列空 */
+        if (!eof_.load() && !vframes_.empty()) {
+            /* 仍有待显示帧 */
+        }
+        bool demuxDone = false;
+        {
+            std::lock_guard<std::mutex> lk(vfMu_);
+            demuxDone = vframes_.empty() && vq_.count() == 0 && vq_.aborted() == false;
+        }
+        (void)demuxDone;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(statMu_);
+        displayedFrames_++;
+        droppedFrames_ += dropped;
+        fpsWindowCount_++;
+        double now = (double)SDL_GetTicks() / 1000.0;
+        if (fpsWindowStart_ == 0.0) fpsWindowStart_ = now;
+        if (now - fpsWindowStart_ >= 1.0) {
+            measuredFps_ = (double)fpsWindowCount_ / (now - fpsWindowStart_);
+            fpsWindowCount_ = 0;
+            fpsWindowStart_ = now;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(curMu_);
+        current_ = pick;
+    }
+    return true;
+}
+
+std::shared_ptr<VideoFrame> Player::currentFrame() const {
+    std::lock_guard<std::mutex> lk(curMu_);
+    return current_;
+}
+
+std::shared_ptr<VideoFrame> Player::copyCurrentFrame() {
+    std::lock_guard<std::mutex> lk(curMu_);
+    if (!current_) return nullptr;
+    auto c = std::make_shared<VideoFrame>(*current_);
+    return c;
+}
+
+void Player::writeBackCurrentFrame(const std::shared_ptr<VideoFrame>& f) {
+    if (!f) return;
+    std::lock_guard<std::mutex> lk(curMu_);
+    current_ = f;
+}
+
+/* ---------------- 控制 ---------------- */
+
+void Player::setPaused(bool p) {
+    if (!opened_) return;
+    paused_ = p;
+    if (!p) extLastTick_ = (double)SDL_GetTicks() / 1000.0;
+}
+
+void Player::togglePause() { setPaused(!paused_.load()); }
+
+bool Player::seekAbsolute(double seconds) {
+    if (!opened_) return false;
+    if (seconds < 0) seconds = 0;
+    if (duration_ > 0 && seconds > duration_) seconds = duration_ - 0.1;
+    {
+        std::lock_guard<std::mutex> lk(seekMu_);
+        seekTarget_ = seconds;
+        seekReq_ = true;
+    }
+    /* 乐观更新时钟：demux 线程真正执行 seek 需要一点时间，
+     * 期间如果时钟还停在旧位置，主线程就会一直等不到 pts 匹配的新帧。 */
+    {
+        std::lock_guard<std::mutex> lk(clockMu_);
+        audioBasePending_ = true;
+        audioChunkPts_ = seconds;
+    }
+    audioWrittenBytes_ = 0;
+    audioConsumedBytes_ = 0;
+    audioLeadBytes_ = 0;
+    lastAudioClock_ = seconds;
+    lastAudioTick_ = (double)SDL_GetTicks() / 1000.0;
+    extPts_ = seconds;
+    extLastTick_ = lastAudioTick_;
+    /* 精确 seek：丢掉目标点之前的解码输出（见 dropBefore_ 注释） */
+    dropBefore_ = seconds > 0.10 ? seconds - 0.10 : 0.0;
+    eof_ = false;
+
+    vq_.wakeAll();
+    aq_.wakeAll();
+    ring_.wake();
+    vfCv_.notify_all();
+    return true;
+}
+
+bool Player::seekRelative(double delta) {
+    return seekAbsolute(position() + delta);
+}
+
+void Player::setVolume(float v) {
+    volume_ = std::max(0.0f, std::min(1.0f, v));
+}
+
+void Player::setMuted(bool m) { muted_ = m; }
+
+bool Player::setSpeed(double s) {
+    if (s < 0.1) s = 0.1;
+    if (s > 8.0) s = 8.0;
+    speed_ = s;
+    return true;
+}
+
+double Player::position() const {
+    if (!opened_) return 0.0;
+    return ((Player*)this)->masterClock();
+}
+
+void Player::fillMediaInfo(PP_MediaInfo* out) const {
+    if (!out) return;
+    std::memset(out, 0, sizeof(*out));
+    std::snprintf(out->path, sizeof(out->path), "%s", path_.c_str());
+    if (fmt_ && fmt_->iformat && fmt_->iformat->name)
+        std::snprintf(out->format, sizeof(out->format), "%s", fmt_->iformat->name);
+    if (vCtx_ && vCtx_->codec && vCtx_->codec->name)
+        std::snprintf(out->video_codec, sizeof(out->video_codec), "%s", vCtx_->codec->name);
+    if (aCtx_ && aCtx_->codec && aCtx_->codec->name)
+        std::snprintf(out->audio_codec, sizeof(out->audio_codec), "%s", aCtx_->codec->name);
+    out->width = srcW_;
+    out->height = srcH_;
+    out->fps = fps_;
+    out->duration = duration_;
+    out->bitrate = bitrate_;
+    out->audio_channels = aStream_ >= 0 ? outChannels_ : 0;
+    out->audio_sample_rate = aStream_ >= 0 ? outSampleRate_ : 0;
+    out->has_video = vStream_ >= 0 ? 1 : 0;
+    out->has_audio = aStream_ >= 0 ? 1 : 0;
+}
+
+void Player::fillStats(PP_PlaybackStats* out) {
+    if (!out) return;
+    std::memset(out, 0, sizeof(*out));
+    out->position = position();
+    out->duration = duration_;
+    out->master_clock = masterClock();
+    out->audio_clock = audioActive_ ? audioClockValue() : 0.0;
+    out->video_clock = videoClockValue();
+    out->speed = speed_.load();
+    out->paused = paused_.load() ? 1 : 0;
+    out->eof = eof_.load() ? 1 : 0;
+    out->audio_sample_rate = outSampleRate_;
+    out->audio_channels = outChannels_;
+    out->audio_buffer_bytes = (int64_t)ring_.avail();
+    {
+        std::lock_guard<std::mutex> lk(statMu_);
+        out->decoded_frames = decodedFrames_;
+        out->displayed_frames = displayedFrames_;
+        out->dropped_frames = (int)droppedFrames_;
+        out->current_fps = measuredFps_;
+    }
+    {
+        std::lock_guard<std::mutex> lk(vfMu_);
+        out->video_queue_depth = (int64_t)vframes_.size();
+    }
+}
+
+int Player::snapshotAudio(float* dst, int maxSamples) const {
+    std::lock_guard<std::mutex> lk(tapMu_);
+    if (audioTap_.empty()) return 0;
+    int cap = (int)audioTap_.size();
+    int n = std::min(maxSamples, audioTapCount_);
+    for (int i = 0; i < n; ++i) {
+        int idx = (audioTapWrite_ - n + i + cap) % cap;
+        dst[i] = audioTap_[idx];
+    }
+    return n;
+}
+
+} // namespace pp

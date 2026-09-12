@@ -1,0 +1,15 @@
+{
+  "name": "pluginplayer-host-js",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PluginPlayer 的进程外 JS 插件宿主（基于 Cordis）",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "@cordisjs/plugin-loader": "^1.0.0-rc.6",
+    "cordis": "^4.0.0-rc.9"
+  }
+}

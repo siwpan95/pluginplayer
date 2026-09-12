@@ -1,0 +1,312 @@
+/* main.cpp — 命令行入口
+ *
+ * 用法:
+ *   pluginplayer.exe [选项] <媒体文件>
+ *
+ * 选项:
+ *   --help, -h              显示帮助
+ *   --list-plugins          列出插件加载报告后退出
+ *   --no-audio              不打开音频设备（静音播放 / 无音频环境下使用）
+ *   --hidden                不显示窗口（配合控制通道做无人值守控制）
+ *   --size WxH              初始窗口尺寸（默认 1280x720；范围 160..8192）
+ *   --start SEC             从指定秒数开始播放
+ *   --volume V              初始音量 0..1（默认 1.0）
+ *   --log-level N           0=TRACE 1=DEBUG 2=INFO 3=WARN 4=ERROR（默认 2）
+ *   --selftest              无人值守自检模式
+ *   --frames N              自检模式解码帧数（默认 60；范围 1..1000000）
+ *   --out DIR               自检产物目录（默认 ./selftest_out）
+ *   --write-dir DIR         追加插件可写目录（默认只允许 exeDir）
+ *   --rpc-port N            控制通道端口（默认 7911；0 = 不启动）
+ *   --rpc-token HEX         指定控制通道令牌（默认每次运行随机生成 256-bit）
+ *   --reload <序号>         启动后热重载指定插件（用于验证）
+ *
+ * 所有数值参数都会做范围与格式校验：非法值一律报错退出（exit 2），
+ * 不会带着越界值继续跑（历史上 --size 99999x99999 会因 int32 溢出崩溃）。
+ */
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <cerrno>
+#include <string>
+#include <vector>
+#include <thread>
+#include <chrono>
+
+#include "app.h"
+#include "util.h"
+
+using namespace pp;
+
+/* 窗口尺寸硬边界与帧数上限：与 app.h 的 kMinWindowSize/kMaxWindowSize 共用同一来源，
+ * 避免两处各写一份数字后走偏（历史上 --size 99999x99999 因 int32 溢出崩溃）。 */
+static const int kMinWin = kMinWindowSize;
+static const int kMaxWin = kMaxWindowSize;
+static const int kMaxFrames = 1000000;
+
+static bool parseSize(const char* s, int* w, int* h) {
+    if (!s) return false;
+    int a = 0, b = 0;
+    char tail = 0;
+    /* 故意多要一个 %c：若返回 3 说明末尾有多余字符，判为非法 */
+    if (sscanf(s, "%dx%d%c", &a, &b, &tail) != 2) return false;
+    if (a < kMinWin || a > kMaxWin || b < kMinWin || b > kMaxWin) return false;
+    *w = a; *h = b;
+    return true;
+}
+
+static bool parseIntStrict(const char* s, long* out) {
+    if (!s || !*s) return false;
+    errno = 0;
+    char* end = nullptr;
+    long v = strtol(s, &end, 10);
+    if (end == s || (end && *end != '\0') || errno == ERANGE) return false;
+    *out = v;
+    return true;
+}
+
+static bool parseDoubleStrict(const char* s, double* out) {
+    if (!s || !*s) return false;
+    errno = 0;
+    char* end = nullptr;
+    double v = strtod(s, &end);
+    if (end == s || (end && *end != '\0') || errno == ERANGE || !std::isfinite(v))
+        return false;
+    *out = v;
+    return true;
+}
+
+static void printHelp() {
+    printf(
+        "\n"
+        "PluginPlayer — 插件版播放器 (FFmpeg %s + SDL3 + 自研插件宿主)\n"
+        "\n"
+        "用法:\n"
+        "  pluginplayer.exe [选项] <媒体文件>\n"
+        "\n"
+        "选项:\n"
+        "  -h, --help            显示本帮助\n"
+        "  --list-plugins        列出插件加载报告后退出\n"
+        "  --no-audio            不打开音频设备\n"
+        "  --hidden              不显示窗口（配合控制通道做无人值守控制）\n"
+        "  --size WxH            初始窗口尺寸（默认 1280x720，范围 160..8192）\n"
+        "  --start SEC           从指定秒数开始播放\n"
+        "  --volume V            初始音量 0..1（默认 1.0）\n"
+        "  --log-level N         0=TRACE 1=DEBUG 2=INFO 3=WARN 4=ERROR（默认 2）\n"
+        "  --selftest            无人值守自检（产出 JSON 报告与帧 PNG）\n"
+        "  --frames N            自检解码帧数（默认 60）\n"
+        "  --out DIR             自检产物目录（默认 ./selftest_out）\n"
+        "  --write-dir DIR       追加插件可写目录（默认只允许 exeDir，可重复）\n"
+        "  --rpc-port N          控制通道端口（默认 7911；0 = 不启动）\n"
+        "  --rpc-token HEX       指定控制通道令牌（默认每次运行随机生成）\n"
+        "  --reload N            启动后热重载第 N 号插件，然后继续播放\n"
+        "\n"
+        "安全说明: 控制通道监听 127.0.0.1 且**强制令牌认证**。令牌在每次启动时\n"
+        "          随机生成，写入 <exeDir>\\config\\rpc-token.txt。客户端必须先发\n"
+        "          {\"method\":\"auth\",\"params\":{\"token\":\"<令牌>\"}} 才能调用任何方法。\n"
+        "\n"
+        "播放中快捷键: 按 H 查看\n",
+        "9.x");
+}
+
+int main(int argc, char** argv) {
+    std::string media;
+    std::string outDir = "selftest_out";
+    int  winW = 1280, winH = 720;
+    int  frames = 60;
+    int  logLevel = L_INFO;
+    int  reloadIndex = -1;
+    bool noAudio = false;
+    bool hidden = false;
+    bool selfTest = false;
+    bool listPlugins = false;
+    int  rpcPort = 7911;
+    double startSec = -1.0;
+    double volume = 1.0;
+    std::string rpcTokenArg;
+    std::vector<std::string> writeDirs;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&](const char* name) -> const char* {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "选项 %s 缺少参数\n", name);
+                exit(2);
+            }
+            return argv[++i];
+        };
+        if (a == "-h" || a == "--help") { printHelp(); return 0; }
+        else if (a == "--list-plugins") listPlugins = true;
+        else if (a == "--no-audio") noAudio = true;
+        else if (a == "--hidden") hidden = true;
+        else if (a == "--selftest") selfTest = true;
+        else if (a == "--size") {
+            const char* v = next("--size");
+            if (!parseSize(v, &winW, &winH)) {
+                fprintf(stderr,
+                        "非法的 --size 值: %s\n"
+                        "  需要 WxH 形式，且宽高都在 %d..%d 之间（例如 1280x720）\n",
+                        v, kMinWin, kMaxWin);
+                return 2;
+            }
+        }
+        else if (a == "--start") {
+            const char* v = next("--start");
+            if (!parseDoubleStrict(v, &startSec)) {
+                fprintf(stderr, "非法的 --start 值: %s（需要数值秒数）\n", v);
+                return 2;
+            }
+        }
+        else if (a == "--volume") {
+            const char* v = next("--volume");
+            if (!parseDoubleStrict(v, &volume) || volume < 0.0 || volume > 1.0) {
+                fprintf(stderr, "非法的 --volume 值: %s（需要 0..1）\n", v);
+                return 2;
+            }
+        }
+        else if (a == "--log-level") {
+            const char* v = next("--log-level");
+            long n = 0;
+            if (!parseIntStrict(v, &n) || n < 0 || n > 4) {
+                fprintf(stderr, "非法的 --log-level 值: %s（需要 0..4）\n", v);
+                return 2;
+            }
+            logLevel = (int)n;
+        }
+        else if (a == "--frames") {
+            const char* v = next("--frames");
+            long n = 0;
+            if (!parseIntStrict(v, &n) || n < 1 || n > kMaxFrames) {
+                fprintf(stderr, "非法的 --frames 值: %s（需要 1..%d）\n", v, kMaxFrames);
+                return 2;
+            }
+            frames = (int)n;
+        }
+        else if (a == "--out") outDir = next("--out");
+        else if (a == "--write-dir") writeDirs.push_back(next("--write-dir"));
+        else if (a == "--rpc-port") {
+            const char* v = next("--rpc-port");
+            long n = 0;
+            if (!parseIntStrict(v, &n) || n < 0 || n > 65535) {
+                fprintf(stderr, "非法的 --rpc-port 值: %s（需要 0..65535）\n", v);
+                return 2;
+            }
+            rpcPort = (int)n;
+        }
+        else if (a == "--rpc-token") {
+            rpcTokenArg = next("--rpc-token");
+            if (rpcTokenArg.size() < 16) {
+                fprintf(stderr, "--rpc-token 太短（至少 16 个字符，建议 64 位 hex）\n");
+                return 2;
+            }
+        }
+        else if (a == "--reload") {
+            const char* v = next("--reload");
+            long n = 0;
+            if (!parseIntStrict(v, &n) || n < 0 || n > 9999) {
+                fprintf(stderr, "非法的 --reload 值: %s（需要 0..9999）\n", v);
+                return 2;
+            }
+            reloadIndex = (int)n;
+        }
+        else if (!a.empty() && a[0] == '-') {
+            fprintf(stderr, "未知选项: %s\n", a.c_str());
+            printHelp();
+            return 2;
+        } else {
+            media = a;
+        }
+    }
+
+    /* 日志先落到 exe 同目录的 logs/ 下 */
+    std::string base = exeDir();
+    makeDirs(pathJoin(base, "logs"));
+    Log::init(pathJoin(pathJoin(base, "logs"), "pluginplayer.log"), (LogLevel)logLevel);
+
+    App app;
+    if (!app.init(winW, winH, hidden || listPlugins || selfTest, !noAudio)) {
+        fprintf(stderr, "初始化失败\n");
+        return 3;
+    }
+
+    /* 插件写入白名单：默认只允许 exeDir（见 Host::addWriteRoot）。
+     * 需要让插件往别的目录写（例如截图存到视频目录）时用 --write-dir 追加。 */
+    for (const auto& d : writeDirs) app.host().addWriteRoot(d);
+
+    /* 插件：发现 -> 加载 -> 启动 */
+    int found = app.plugins().discover(app.host().pluginDir());
+    int okCnt = app.plugins().loadAll(&app.host());
+    app.plugins().startAll(&app.host());
+
+    printf("插件目录: %s\n", app.host().pluginDir().c_str());
+    printf("%s\n", app.plugins().report(false).c_str());
+
+    if (listPlugins) {
+        app.shutdown();
+        if (found <= 0) {
+            fprintf(stderr, "未发现任何插件\n");
+            return 4;
+        }
+        if (okCnt != found) {
+            fprintf(stderr, "插件加载不完整：成功 %d / 发现 %d\n", okCnt, found);
+            return 4;
+        }
+        return 0;
+    }
+
+    if (reloadIndex > 0) {
+        PP_INFO("热重载插件槽位 #%d ...", reloadIndex);
+        bool ok = app.plugins().reloadOne(&app.host(), reloadIndex - 1);
+        PP_INFO("热重载结果: %s", ok ? "成功" : "失败");
+        printf("%s\n", app.plugins().report(false).c_str());
+    }
+
+    app.host().bus().publish(app.host().handle(), PP_TOPIC_APP_READY, "{}");
+
+    /* 控制通道：进程外插件（host-js / Cordis、外部脚本）从这里驱动播放器。
+     * 强制令牌认证：令牌每次启动随机生成，落入 <exeDir>/config/rpc-token.txt，
+     * 客户端必须先 auth 才能调用任何方法（详见 control.h 的安全模型）。 */
+    std::string rpcToken = rpcTokenArg.empty() ? RpcServer::generateToken() : rpcTokenArg;
+    if (rpcPort > 0 && rpcPort <= 65535) {
+        std::string tokDir  = pathJoin(base, "config");
+        std::string tokPath = pathJoin(tokDir, "rpc-token.txt");
+        makeDirs(tokDir);
+        FILE* tf = fopen(tokPath.c_str(), "wb");
+        if (tf) {
+            fwrite(rpcToken.data(), 1, rpcToken.size(), tf);
+            fclose(tf);
+            PP_INFO("控制通道令牌已写入: %s", tokPath.c_str());
+        } else {
+            PP_WARN("无法写入令牌文件: %s（客户端可用 --rpc-token 直接传入）", tokPath.c_str());
+        }
+        printf("控制通道: 127.0.0.1:%d   令牌文件: %s\n", rpcPort, tokPath.c_str());
+    }
+    if (!app.startRpc(rpcPort, rpcToken)) {
+        if (rpcPort > 0)
+            fprintf(stderr, "控制通道启动失败（端口 %d 不可用），播放器继续运行。\n", rpcPort);
+    }
+
+    int rc = 0;
+    if (selfTest) {
+        if (media.empty()) {
+            fprintf(stderr, "自检模式必须给定媒体文件\n");
+            app.shutdown();
+            return 2;
+        }
+        rc = app.selfTest(media, frames, outDir);
+    } else {
+        if (!media.empty()) {
+            if (!app.openMedia(media)) {
+                fprintf(stderr, "打开媒体失败，按 H 查看帮助；程序仍将保持运行以便排查。\n");
+            } else {
+                app.player().setVolume((float)volume);
+                if (startSec > 0) app.player().seekAbsolute(startSec);
+            }
+        }
+        app.run();
+    }
+
+    app.shutdown();
+    Log::shutdown();
+    return rc;
+}
