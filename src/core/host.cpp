@@ -71,9 +71,11 @@ int Host::revokeAll(int owner) {
     n += bus_.unsubscribeAllOf(owner);
     n += services_.removeAllOf(owner);
     n += commands_.removeAllOf(owner);
-    n += chain_.removeAllOf(owner);
+    n += chain_.removeAllOf(owner);      /* 帧链处理器（含帧订阅对应的那些）已在此摘掉 */
     for (auto& a : frameSubs_) {
-        if (a && a->owner == owner) { chain_.remove(a->chainId); n++; }
+        /* 只计数：链条目上一步已经按 owner 摘掉了，这里再 chain_.remove() 是空操作，
+         * 旧实现却照样 n++，导致撤销数字虚高（日志里看不到真实撤销数）。 */
+        if (a && a->owner == owner) n++;
     }
     frameSubs_.erase(std::remove_if(frameSubs_.begin(), frameSubs_.end(),
                                     [owner](const std::unique_ptr<FrameSubAdapter>& p) {
@@ -81,6 +83,7 @@ int Host::revokeAll(int owner) {
                                     }),
                      frameSubs_.end());
     dropSubsOf(owner);
+    bus_.clearTopicModesOf(owner);       /* 插件声明的自定义主题模式一并撤销 */
     return n;
 }
 
@@ -254,8 +257,13 @@ static int   api_play(PP_Host* h) { Player* p = HOST(h)->player(); if (p) { p->s
 static int   api_pause(PP_Host* h) { Player* p = HOST(h)->player(); if (p) { p->setPaused(true); } return 0; }
 static int   api_toggle_pause(PP_Host* h) { Player* p = HOST(h)->player(); if (p) p->togglePause(); return 0; }
 static int   api_stop(PP_Host* h) {
+    /* 「停止」应当真的停下来并回到起点。旧实现只做 pause ——
+     * 名字与行为不符：调 stop 之后位置还停在原处。 */
     Host* H = HOST(h);
-    if (H->player()) H->player()->setPaused(true);
+    Player* p = H->player();
+    if (!p) return -1;
+    p->setPaused(true);
+    p->seekAbsolute(0.0);
     H->bus().publish(h, PP_TOPIC_PLAY_STOPPED, "{}");
     return 0;
 }
@@ -353,6 +361,14 @@ static int api_dispatch(PP_Host* h, const char* topic, void* payload, int size) 
 
 static int api_topic_mode(PP_Host* h, const char* topic) {
     return HOST(h)->bus().topicMode(topic);
+}
+
+/** 声明插件自定义主题的分发模式（emit/waterfall/serial/bail）。
+ *  注册归当前插件所有，卸载时随 revokeAll 一起清除。 */
+static int api_set_topic_mode(PP_Host* h, const char* topic, int mode) {
+    if (!topic) return -1;
+    Host* H = HOST(h);
+    return H->bus().setTopicMode(topic, mode, H->owner());
 }
 
 static int frameSubThunk(PP_Host* h, PP_FrameView* view, void* user) {
@@ -539,6 +555,7 @@ void Host::buildApi() {
     api_.publish = &api_publish;
     api_.dispatch = &api_dispatch;
     api_.topic_mode = &api_topic_mode;
+    api_.set_topic_mode = &api_set_topic_mode;
 
     api_.register_service = &api_register_service;
     api_.unregister_service = &api_unregister_service;

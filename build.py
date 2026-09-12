@@ -18,6 +18,8 @@ build.py — PluginPlayer 构建脚本
 """
 import os
 import sys
+import glob
+import hashlib
 import shutil
 import subprocess
 import argparse
@@ -227,6 +229,7 @@ def package():
         if cp(os.path.join(BUILD, pl + ".dll"), os.path.join(DIST, "plugins")):
             p += 1
     print(f"[OK] 复制运行时 DLL {n} 个，插件 {p} 个")
+    write_plugin_manifest()
 
     # MinGW 运行时 DLL（libstdc++/libgcc 已静态链接，但 libwinpthread 仍需随行）
     mingw_bin = os.path.dirname(GXX)
@@ -262,28 +265,107 @@ def package():
     return True
 
 
+# 运行期产物：不该随发布物分发，--release 会从 dist/ 里清掉
+RUNTIME_ARTIFACTS = [
+    "logs", "selftest_out", "test_assets",
+]
+
+
+def write_plugin_manifest():
+    """为 dist/plugins 生成 SHA-256 完整性清单。
+    宿主在清单**存在时**会强制校验：未列出或哈希不符的插件拒绝加载。
+    用 Python 的 hashlib 算，不必启动播放器。"""
+    pdir = os.path.join(DIST, "plugins")
+    if not os.path.isdir(pdir):
+        return 0
+    lines = [
+        "# PluginPlayer 插件完整性清单",
+        "# 格式: <sha256>  <文件名>（与 sha256sum 兼容）",
+        "# 由 build.py 自动生成。手动往 plugins/ 里加 DLL 后必须重新生成，",
+        "# 否则该 DLL 会被宿主拒绝加载（也可运行时执行 pluginplayer.exe --write-plugin-manifest）。",
+        "",
+    ]
+    n = 0
+    for f in sorted(os.listdir(pdir)):
+        if not f.lower().endswith(".dll"):
+            continue
+        h = hashlib.sha256()
+        with open(os.path.join(pdir, f), "rb") as fp:
+            for chunk in iter(lambda: fp.read(1 << 20), b""):
+                h.update(chunk)
+        lines.append(f"{h.hexdigest()}  {f}")
+        n += 1
+    with open(os.path.join(pdir, "manifest.sha256"), "w",
+              encoding="utf-8", newline="\n") as fp:
+        fp.write("\n".join(lines) + "\n")
+    print(f"[OK] 已生成 plugins/manifest.sha256（{n} 个插件）")
+    return n
+
+
+def strip_runtime_artifacts():
+    """发布前清理 dist/ 里的运行期产物（日志、自检证据、测试素材、令牌）。"""
+    removed = []
+    for name in RUNTIME_ARTIFACTS:
+        # 前缀匹配：selftest_out / selftest_out_short / selftest_out_audio … 一起清掉
+        for p in glob.glob(os.path.join(DIST, name + "*")):
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+                removed.append(os.path.basename(p) + "/")
+            elif os.path.isfile(p):
+                try:
+                    os.remove(p)
+                    removed.append(os.path.basename(p))
+                except OSError:
+                    pass
+    tok = os.path.join(DIST, "config", "rpc-token.txt")
+    if os.path.isfile(tok):
+        try:
+            os.remove(tok)
+            removed.append("config/rpc-token.txt")
+        except OSError:
+            pass
+    for f in glob.glob(os.path.join(DIST, "**", "*.log"), recursive=True):
+        try:
+            os.remove(f)
+            removed.append(os.path.relpath(f, DIST).replace("\\", "/"))
+        except OSError:
+            pass
+    return removed
+
+
+def release_summary():
+    files = [f for f in glob.glob(os.path.join(DIST, "**", "*"), recursive=True)
+             if os.path.isfile(f)]
+    total = sum(os.path.getsize(f) for f in files)
+    print(f"\n[release] 可发布文件 {len(files)} 个，合计 {total/1048576:.1f} MB")
+    print(f"[release] 目录: {DIST}")
+    return len(files), total
+
+
 def make_launcher():
+    # 纯 ASCII 内容 + CRLF：cmd.exe 按 GBK 解读 .bat，混入中文会在非中文代码页
+    # 的机器上乱码/截断（旧版这里带中文注释，属可移植性问题）。
     bat = os.path.join(ROOT, "run.bat")
-    with open(bat, "w", encoding="gbk", errors="replace") as f:
+    with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
         f.write("@echo off\r\n"
-                "rem PluginPlayer 启动器：把媒体文件拖到本文件上即可播放\r\n"
+                "rem PluginPlayer launcher: drag a media file onto this file to play it.\r\n"
                 "setlocal\r\n"
                 "cd /d %~dp0dist\r\n"
                 "pluginplayer.exe %*\r\n")
     selftest = os.path.join(ROOT, "selftest.bat")
-    with open(selftest, "w", encoding="gbk", errors="replace") as f:
+    with open(selftest, "w", encoding="utf-8", newline="\r\n") as f:
         f.write("@echo off\r\n"
-                "rem 一键自检：构建 -> 生成测试视频 -> 跑通全链路 -> 输出 JSON 报告\r\n"
+                "rem One-click self test: build -> smoke -> make sample -> full chain -> JSON report\r\n"
                 "setlocal\r\n"
                 "cd /d %~dp0\r\n"
                 "if not exist vendor\\ffmpeg\\bin\\ffmpeg.exe (\r\n"
-                "  echo [ERR] 缺少 vendor\\ffmpeg\\bin\\ffmpeg.exe，请先执行 tools\\fetch_deps.py\r\n"
+                "  echo [ERR] vendor\\ffmpeg\\bin\\ffmpeg.exe is missing. Run tools\\fetch_deps.py first.\r\n"
                 "  pause & exit /b 1\r\n"
                 ")\r\n"
                 "F:\\Python314\\python.exe build.py || pause\r\n"
-                "echo [1/3] 冒烟测试（tests/smoke_link.cpp + tests/smoke_audio.cpp）\r\n"
+                "echo [1/3] smoke tests (tests/smoke_link.cpp + tests/smoke_audio.cpp)\r\n"
                 "F:\\Python314\\python.exe build.py --smoke\r\n"
-                "if errorlevel 1 echo [WARN] 冒烟测试有失败项，详见上方输出\r\n"
+                "if errorlevel 1 echo [WARN] smoke test had failures, see output above\r\n"
                 "cd dist\r\n"
                 "if not exist test_assets mkdir test_assets\r\n"
                 "if not exist test_assets\\sample.mp4 "
@@ -293,9 +375,9 @@ def make_launcher():
                 "-t 8 -c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -shortest "
                 "test_assets\\sample.mp4\r\n"
                 "pluginplayer.exe --selftest --frames 90 --out selftest_out test_assets\\sample.mp4\r\n"
-                "echo.\r\necho 报告: dist\\selftest_out\\selftest_report.json\r\n"
+                "echo.\r\necho report: dist\\selftest_out\\selftest_report.json\r\n"
                 "pause\r\n")
-    print("[OK] 已生成 run.bat 与 selftest.bat")
+    print("[OK] 已生成 run.bat 与 selftest.bat（纯 ASCII，CRLF）")
 
 
 def main():
@@ -306,12 +388,19 @@ def main():
                     help="编译并运行 tests/ 下的冒烟测试后退出")
     ap.add_argument("--apitest", action="store_true",
                     help="编译插件 API 回归测试插件后退出")
+    ap.add_argument("--release", action="store_true",
+                    help="干净重建 + 清理 dist/ 里的运行期产物（日志/自检证据/测试素材/令牌）")
     ap.add_argument("--plugins", default="", help="逗号分隔，只编译指定插件")
     ap.add_argument("--list", action="store_true", help="列出插件")
     ap.add_argument("--no-package", action="store_true")
     ap.add_argument("--debug", action="store_true",
                     help="用 -O0 -g 构建（便于 gdb 抓崩溃栈，体积大）")
     args = ap.parse_args()
+
+    # --release 隐含一次干净构建：否则 dist/ 会继承上一次构建的残留
+    # （实测：上一轮放进 plugins/ 的测试 DLL 与一堆 selftest_out_* 都留了下来）。
+    if args.release:
+        args.clean = True
 
     if args.list:
         for p in PLUGINS:
@@ -339,7 +428,9 @@ def main():
             if os.path.isdir(d):
                 shutil.rmtree(d)
                 print(f"[OK] 已删除 {d}")
-        return 0
+        if not args.release:
+            return 0
+        print("[--release] 已清空 build/ 与 dist/，继续做全新构建")
 
     if not check_toolchain():
         return 1
@@ -365,6 +456,13 @@ def main():
     if not args.no_package:
         package()
         make_launcher()
+        if args.release:
+            removed = strip_runtime_artifacts()
+            if removed:
+                print("[release] 已清理运行期产物：" + ", ".join(removed))
+            else:
+                print("[release] dist/ 中没有运行期产物需要清理")
+            release_summary()
 
     print(f"\n{'[PASS]' if okAll else '[FAIL]'} 构建{'成功' if okAll else '有失败项'}，用时 {time.time()-t0:.1f}s")
     if okAll:

@@ -376,22 +376,21 @@ void RpcServer::broadcastEvent(const std::string& topic, const std::string& json
 /* ------------------------- 请求处理 ------------------------- */
 
 std::string RpcServer::handleRequest(const std::string& line, const std::shared_ptr<Client>& c) {
+    /* 严格解析顶层请求。非法 JSON 直接拒绝。
+     * 旧实现用子串搜索找 "params" 并用花括号计数切分 —— 字符串里出现
+     * 大括号就会切错，键名出现在字符串值里也会误命中。 */
+    std::vector<std::pair<std::string, std::string>> top;
+    std::string jerr;
+    if (!jsonParseObject(line, &top, &jerr)) {
+        if (jerr.size() > 120) jerr.resize(120);      /* 不回显超长输入 */
+        return format("{\"id\":0,\"ok\":false,\"error\":\"非法 JSON 请求: %s\"}",
+                      jsonEscape(jerr).c_str());
+    }
     int    id = (int)jsonGetNumber(line, "id", 0);
     std::string method = jsonGetString(line, "method", "");
     std::string params = "{}";
-    size_t p = line.find("\"params\"");
-    if (p != std::string::npos) {
-        size_t b = line.find('{', p);
-        if (b != std::string::npos) {
-            int depth = 0;
-            for (size_t i = b; i < line.size(); ++i) {
-                if (line[i] == '{') depth++;
-                else if (line[i] == '}') {
-                    depth--;
-                    if (depth == 0) { params = line.substr(b, i - b + 1); break; }
-                }
-            }
-        }
+    for (const auto& kv : top) {
+        if (kv.first == "params") { params = kv.second; break; }   /* 原始切片，按需再解析 */
     }
 
     App* app = host_ ? host_->app() : nullptr;
@@ -468,8 +467,12 @@ std::string RpcServer::handleRequest(const std::string& line, const std::shared_
         if (method == "player.play")        pl->setPaused(false);
         else if (method == "player.pause")  pl->setPaused(true);
         else if (method == "player.toggle") pl->togglePause();
-        else                                pl->setPaused(true);
-        return ok(format("{\"paused\":%d}", pl->paused() ? 1 : 0));
+        else {                              /* player.stop：停下来并回到起点 */
+            pl->setPaused(true);
+            pl->seekAbsolute(0.0);
+        }
+        return ok(format("{\"paused\":%d,\"position\":%.3f}", pl->paused() ? 1 : 0,
+                         pl->position()));
     }
 
     if (method == "player.seek") {
@@ -521,26 +524,14 @@ std::string RpcServer::handleRequest(const std::string& line, const std::shared_
     if (method == "command.invoke") {
         std::string name = jsonGetString(params, "name", "");
         if (name.empty() || !host_) return err("缺少 name 参数");
-        /* 解析 args: ["a","b"] */
+        /* args 必须是「字符串数组」；用严格解析，元素不是字符串就判非法
+         * （旧实现是手工找引号配对，遇到转义引号会错乱） */
         std::vector<std::string> args;
-        std::vector<const char*> argv;
-        size_t a = params.find("\"args\"");
-        if (a != std::string::npos) {
-            size_t b = params.find('[', a);
-            size_t e = params.find(']', b == std::string::npos ? a : b);
-            if (b != std::string::npos && e != std::string::npos && e > b) {
-                std::string arr = params.substr(b + 1, e - b - 1);
-                size_t i = 0;
-                while (i < arr.size()) {
-                    size_t q1 = arr.find('"', i);
-                    if (q1 == std::string::npos) break;
-                    size_t q2 = arr.find('"', q1 + 1);
-                    if (q2 == std::string::npos) break;
-                    args.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
-                    i = q2 + 1;
-                }
-            }
+        if (params.find("\"args\"") != std::string::npos) {
+            if (!jsonGetStringArray(params, "args", &args))
+                return err("args 必须是字符串数组");
         }
+        std::vector<const char*> argv;
         for (auto& s : args) argv.push_back(s.c_str());
         int rc = host_->invokeCommand(name, (int)argv.size(), argv.empty() ? nullptr : argv.data());
         if (rc < 0 && !host_->hasCommand(name)) return err("命令不存在: " + name);

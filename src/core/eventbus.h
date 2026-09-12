@@ -12,6 +12,7 @@
  */
 #include <string>
 #include <vector>
+#include <map>
 #include <mutex>
 
 #include "player_plugin.h"
@@ -39,6 +40,11 @@ public:
     int  dispatch(PP_Host* host, const char* topic, void* payload, int size);
 
     int  topicMode(const char* topic) const;
+    /** 插件自定义主题的分发模式（覆盖默认模式表）。
+     *  不提供这个接口时，插件自定义的主题只能走 EMIT —— 想用 waterfall/BAIL
+     *  就无处声明。注册会记 owner，插件卸载时一并清除（可撤销注册）。 */
+    int  setTopicMode(const std::string& topic, int mode, int owner);
+    int  clearTopicModesOf(int owner);
     int  subscriberCount(const std::string& topic) const;
     int  totalSubscriptions() const;
     std::vector<std::string> topics() const;
@@ -47,6 +53,8 @@ private:
     mutable std::mutex         mu_;
     std::vector<Subscription>  subs_;
     int                        nextId_ = 1;
+    std::map<std::string, int> modeOverride_;      /* 主题 -> 模式 */
+    std::map<std::string, int> modeOverrideOwner_; /* 主题 -> 注册它的插件槽位 */
 };
 
 } // namespace pp

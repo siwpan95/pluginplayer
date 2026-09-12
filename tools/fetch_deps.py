@@ -11,6 +11,8 @@ fetch_deps.py — 准备 vendor/ 依赖（SDL3 + FFmpeg 共享开发包）
     ... --src G:/local/player          # 指定本地资源目录（默认会自动探测）
     ... --vendor ./vendor              # 指定输出目录
     ... --no-verify                    # 跳过 SHA-256 校验（不推荐，只在校验误报时用）
+    ... --check-update                 # 只查上游有没有更新（HEAD 请求，不下载）
+    ... --refresh                      # 忽略本机档案，强制重新下载（升级依赖用）
 
 需要的材料（任选其一来源）:
     SDL3-devel-3.4.16-mingw.zip        SDL3 头文件 + libSDL3.dll.a + 导入库
@@ -94,14 +96,31 @@ def find_7z():
     return None
 
 
-def find_local(src_dirs, keyword):
+def find_local(src_dirs, keyword, prefer_name=None):
+    """在候选目录里找一个文件名含 keyword 的档案。
+
+    注意：keyword 必须足够具体。早期实现用 `key.split("-")[0]`，
+    于是 "SDL3-devel" 与 "SDL3-win32-x64" 都退化成搜 "SDL3"，
+    两槽位会命中同一个文件（曾导致取到错误的档案）。
+    这里额外支持 prefer_name（优先精确文件名）。
+    """
     for d in src_dirs:
         if not os.path.isdir(d):
             continue
+        cands = []
         for pat in ("*.7z", "*.zip", "*.tar.gz"):
             for f in glob.glob(os.path.join(d, pat)):
                 if keyword.lower() in os.path.basename(f).lower():
+                    cands.append(f)
+        if not cands:
+            continue
+        # 同一个目录内优先精确文件名；目录之间按 src_dirs 顺序，先命中者胜
+        # （否则缓存目录里的"同名半成品"会盖过真正的本地档案）
+        if prefer_name:
+            for f in cands:
+                if os.path.basename(f).lower() == prefer_name.lower():
                     return f
+        return cands[0]
     return None
 
 
@@ -215,16 +234,27 @@ def check_containment(root):
 
 def download(url, out):
     print(f"    下载 {url}")
+    # 先写 .part，成功后再改名：否则半途失败会留下"够大但损坏"的缓存，
+    # 下次被当成有效缓存复用（size>1024 的检查拦不住）。
+    part = out + ".part"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    got = 0
     with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=900) as r, \
-            open(out, "wb") as f:
-        got = 0
+            open(part, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
         while True:
             c = r.read(1 << 20)
             if not c:
                 break
             f.write(c)
             got += len(c)
+    if total and got != total:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise RuntimeError(f"下载不完整：期望 {total} 字节，实际 {got} 字节")
+    os.replace(part, out)
     print(f"    完成 {out} ({got} bytes)")
     return os.path.getsize(out) > 1024
 
@@ -239,6 +269,50 @@ def extract(sevenz, archive, dest, keywords=None):
     return r.returncode == 0
 
 
+def check_update(src_dirs, cache):
+    """只做 HEAD 请求，比较上游 Content-Length 与本机档案大小。
+    用来回答"现在有没有值得重新抓取的更新" —— 不必真的下载 58MB。"""
+    print("[check-update] 只发 HEAD 请求，不会下载或改动任何文件\n")
+    any_new = False
+    for key, nice, kw in (("SDL3-devel", "SDL3-devel-3.4.16-mingw.zip", "sdl3-devel"),
+                          ("SDL3-win32-x64", "SDL3-3.4.16-win32-x64.zip", "sdl3-3.4.16-win32-x64"),
+                          ("ffmpeg-shared", "ffmpeg-9.0.1-full_build-shared.7z", "ffmpeg")):
+        url = DOWNLOADS[key]
+        local = find_local(src_dirs, kw, prefer_name=nice)
+        if not local:
+            c = os.path.join(cache, nice)
+            local = c if os.path.isfile(c) else None
+        local_size = os.path.getsize(local) if local else None
+        try:
+            req = urllib.request.Request(url, method="HEAD",
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, context=ssl.create_default_context(),
+                                        timeout=30) as r:
+                up_size = r.headers.get("Content-Length")
+                up_lm = r.headers.get("Last-Modified")
+            up_size = int(up_size) if up_size else -1
+        except Exception as e:
+            print(f"  [ERR] {nice}: 查询失败 {e}")
+            continue
+        if local_size is None:
+            print(f"  [{nice}] 上游 {up_size} 字节 / Last-Modified={up_lm}")
+            print(f"          本机未找到对应档案 → 需要下载")
+            any_new = True
+        elif local_size == up_size:
+            print(f"  [无更新] {nice}: 上游与本机同为 {up_size} 字节"
+                  f"（Last-Modified={up_lm}）")
+            print(f"          本机对照档案: {local}")
+        else:
+            print(f"  [有更新] {nice}: 本机 {local_size} 字节（{local}）"
+                  f" → 上游 {up_size} 字节（Last-Modified={up_lm}）")
+            print(f"          抓取: python tools/fetch_deps.py --refresh")
+            print(f"          抓完请把新哈希更新到本文件的 DEPS_SHA256")
+            any_new = True
+    print("\n[check-update] " + ("发现可用更新，见上。" if any_new else
+                                 "上游与本地一致：当前没有值得重新抓取的更新。"))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", action="append", default=[])
@@ -246,7 +320,14 @@ def main():
     ap.add_argument("--tmp", default=os.path.join(ROOT, "_deps"))
     ap.add_argument("--no-verify", action="store_true",
                     help="跳过 SHA-256 校验与条目检查（不推荐）")
+    ap.add_argument("--refresh", action="store_true",
+                    help="忽略本机已有档案与缓存，强制重新下载（用于升级依赖版本）")
+    ap.add_argument("--check-update", action="store_true",
+                    help="只查上游是否已更新（HEAD 请求，不下载）")
     args = ap.parse_args()
+
+    if args.check_update:
+        return check_update(args.src + DEFAULT_SRC_DIRS, args.tmp)
 
     src_dirs = args.src + DEFAULT_SRC_DIRS
     sevenz = find_7z()
@@ -267,24 +348,29 @@ def main():
         os.makedirs(cache, exist_ok=True)
 
     plan = [
-        ("SDL3-devel", "SDL3-devel-3.4.16-mingw.zip"),
-        ("SDL3-win32-x64", "SDL3-3.4.16-win32-x64.zip"),
-        ("ffmpeg-shared", "ffmpeg-9.0.1-full_build-shared.7z"),
+        # key, 下载保存名, 本地匹配关键字
+        ("SDL3-devel", "SDL3-devel-3.4.16-mingw.zip", "sdl3-devel"),
+        ("SDL3-win32-x64", "SDL3-3.4.16-win32-x64.zip", "sdl3-3.4.16-win32-x64"),
+        ("ffmpeg-shared", "ffmpeg-9.0.1-full_build-shared.7z", "ffmpeg"),
     ]
 
     archives = {}
-    for key, nice in plan:
-        local = find_local(src_dirs, key.split("-")[0])
+    for key, nice, kw in plan:
+        local = None if args.refresh else find_local(src_dirs, kw, prefer_name=nice)
         if local:
             print(f"[1/3] {nice}: 使用本机档案 {local}")
             archives[key] = local
         else:
             dst = os.path.join(cache, nice)
-            if os.path.isfile(dst) and os.path.getsize(dst) > 1024:
+            cached_ok = (not args.refresh) and os.path.isfile(dst) and os.path.getsize(dst) > 1024
+            if cached_ok:
                 print(f"[1/3] {nice}: 使用已下载缓存 {dst}")
                 archives[key] = dst
             else:
-                print(f"[1/3] {nice}: 本机未找到，尝试下载")
+                if args.refresh:
+                    print(f"[1/3] {nice}: --refresh，忽略本机档案与缓存，重新下载")
+                else:
+                    print(f"[1/3] {nice}: 本机未找到，尝试下载")
                 try:
                     download(DOWNLOADS[key], dst)
                     archives[key] = dst

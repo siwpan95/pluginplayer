@@ -18,6 +18,8 @@ namespace pp {
 static const int64_t VIDEO_QUEUE_MAX_FRAMES = 16;
 static const int64_t VIDEO_PACKET_MAX_BYTES = 24 * 1024 * 1024;
 static const int64_t AUDIO_PACKET_MAX_BYTES = 8 * 1024 * 1024;
+/* demux 连续读失败多少次后判定"读不下去了"（每次重试间隔 20ms，100 次 ≈ 2 秒） */
+static const int kMaxReadErrors = 100;
 
 /* ======================= PacketQueue ======================= */
 
@@ -315,9 +317,8 @@ void Player::close() {
     ring_.setAbort(true);
     ring_.wake();
     vfCv_.notify_all();
-    {
-        std::lock_guard<std::mutex> lk(clockMu_);
-    }
+    /* 原先这里有一对 `{ lock_guard clockMu_; }` 的空临界区 —— 什么都不保护，
+     * 只是一次无意义的加解锁。真正需要的同步由下面的线程 join 保证，故删除。 */
 
     if (demuxTh_.joinable()) demuxTh_.join();
     if (vdecTh_.joinable())  vdecTh_.join();
@@ -353,6 +354,8 @@ void Player::close() {
 /* ---------------- demux ---------------- */
 
 void Player::demuxLoop() {
+    /* 连续读失败计数：用于给"损坏输入"一个终止条件（见下面的失败分支） */
+    int readErrors = 0;
     while (!abort_) {
         if (seekReq_.load()) {
             double target = 0;
@@ -365,6 +368,7 @@ void Player::demuxLoop() {
             drainSent_ = false;
             demuxFinished_ = false;
             eof_ = false;
+            readErrors = 0;
 
             int64_t ts = (int64_t)(target * AV_TIME_BASE);
             int ret = av_seek_frame(fmt_, -1, ts, AVSEEK_FLAG_BACKWARD);
@@ -402,8 +406,10 @@ void Player::demuxLoop() {
             if (ret == AVERROR_EOF) {
                 if (!drainSent_) {
                     /* 送空包让解码器把残留帧吐完 */
-                    if (vStream_ >= 0) { AVPacket* e = av_packet_alloc(); vq_.put(e); }
-                    if (aStream_ >= 0) { AVPacket* e = av_packet_alloc(); aq_.put(e); }
+                    /* av_packet_alloc 失败（OOM）时不能 put(nullptr)：
+                     * 解码线程把 data==nullptr 当作"drain 空包"，会造成提前收尾。 */
+                    if (vStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) vq_.put(e); }
+                    if (aStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) aq_.put(e); }
                     drainSent_ = true;
                     demuxFinished_ = true;
                     eof_ = true;
@@ -413,10 +419,30 @@ void Player::demuxLoop() {
             }
             char err[AV_ERROR_MAX_STRING_SIZE] = {0};
             av_strerror(ret, err, sizeof(err));
-            PP_WARN("av_read_frame 出错: %s", err);
+            /* 给"永远读不出东西"一个终止条件：损坏文件 / 设备掉线时
+             * av_read_frame 会一直返回非 EOF 的错误，旧实现只是 sleep+continue，
+             * 文件既不到 EOF 也不结束 —— 对外表现就是"卡死"。
+             * 这里连续失败到上限就主动按结束收尾（并让解码器 drain）。 */
+            if (++readErrors >= kMaxReadErrors) {
+                PP_ERROR("av_read_frame 连续失败 %d 次（%s），放弃读取并按播放结束处理",
+                         readErrors, err);
+                if (!drainSent_) {
+                    /* av_packet_alloc 失败（OOM）时不能 put(nullptr)：
+                     * 解码线程把 data==nullptr 当作"drain 空包"，会造成提前收尾。 */
+                    if (vStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) vq_.put(e); }
+                    if (aStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) aq_.put(e); }
+                    drainSent_ = true;
+                    demuxFinished_ = true;
+                    eof_ = true;
+                }
+                break;
+            }
+            if (readErrors == 1 || readErrors % 10 == 0)
+                PP_WARN("av_read_frame 出错（第 %d 次）: %s", readErrors, err);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
+        readErrors = 0;      /* 读到包就清零 */
 
         if (pkt->stream_index == vStream_) {
             vq_.put(pkt);
@@ -496,83 +522,99 @@ void Player::videoDecodeLoop() {
             avcodec_flush_buffers(vCtx_);
             lastQSerial = serial;
         }
-        if (pkt->data == nullptr) {
-            avcodec_send_packet(vCtx_, nullptr);
-        } else {
-            int sret = avcodec_send_packet(vCtx_, pkt);
-            av_packet_unref(pkt);
-            if (sret < 0 && sret != AVERROR(EAGAIN)) continue;
-        }
+        /* 把解码器里已就绪的帧全部取出并处理。
+         * 返回 false 表示本次包的处理应当中止（abort / seek / 序号变化）。 */
+        auto drainDecoder = [&]() -> bool {
+            for (;;) {
+                int rret = avcodec_receive_frame(vCtx_, fr);
+                if (rret == AVERROR(EAGAIN)) break;
+                if (rret == AVERROR_EOF) break;
+                if (rret < 0) break;
 
-        for (;;) {
-            int rret = avcodec_receive_frame(vCtx_, fr);
-            if (rret == AVERROR(EAGAIN)) break;
-            if (rret == AVERROR_EOF) break;
-            if (rret < 0) break;
+                /* seek/flush 之后，队列序号会递增；在途的旧包解出来的帧一律作废，
+                 * 否则会把 seek 前的画面/时间戳混进新时间轴。 */
+                if (serial != vq_.serial()) { av_frame_unref(fr); continue; }
+                double pts = nextPts;
+                if (fr->best_effort_timestamp != AV_NOPTS_VALUE) {
+                    pts = (double)fr->best_effort_timestamp * av_q2d(tb);
+                }
+                double dur = (fr->duration > 0) ? (double)fr->duration * av_q2d(tb)
+                                                : (fps_ > 0 ? 1.0 / fps_ : 1.0 / 30.0);
+                nextPts = pts + dur;
 
-            /* seek/flush 之后，队列序号会递增；在途的旧包解出来的帧一律作废，
-             * 否则会把 seek 前的画面/时间戳混进新时间轴。 */
-            if (serial != vq_.serial()) { av_frame_unref(fr); continue; }
-            double pts = nextPts;
-            if (fr->best_effort_timestamp != AV_NOPTS_VALUE) {
-                pts = (double)fr->best_effort_timestamp * av_q2d(tb);
-            }
-            double dur = (fr->duration > 0) ? (double)fr->duration * av_q2d(tb)
-                                            : (fps_ > 0 ? 1.0 / fps_ : 1.0 / 30.0);
-            nextPts = pts + dur;
+                /* seek 后丢弃目标点之前的画面，保证跳到用户指定位置 */
+                if (pts < dropBefore_.load()) { av_frame_unref(fr); continue; }
 
-            /* seek 后丢弃目标点之前的画面，保证跳到用户指定位置 */
-            if (pts < dropBefore_.load()) { av_frame_unref(fr); continue; }
+                /* 目标尺寸：按 coded 尺寸做像素格式转换，方向比交给渲染层 */
+                int w = fr->width > 0 ? fr->width : srcW_;
+                int h = fr->height > 0 ? fr->height : srcH_;
+                if (w <= 0 || h <= 0) { av_frame_unref(fr); continue; }
 
-            /* 目标尺寸：按 coded 尺寸做像素格式转换，方向比交给渲染层 */
-            int w = fr->width > 0 ? fr->width : srcW_;
-            int h = fr->height > 0 ? fr->height : srcH_;
-            if (w <= 0 || h <= 0) { av_frame_unref(fr); continue; }
+                if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != fr->format) {
+                    if (sws_) sws_freeContext(sws_);
+                    sws_ = sws_getContext(w, h, (AVPixelFormat)fr->format,
+                                          w, h, AV_PIX_FMT_RGBA,
+                                          SWS_BILINEAR, nullptr, nullptr, nullptr);
+                    swsW_ = w; swsH_ = h; swsFmt_ = fr->format;
+                    if (!sws_) {
+                        PP_ERROR("sws_getContext 失败 (fmt=%d)", fr->format);
+                        av_frame_unref(fr);
+                        continue;
+                    }
+                }
 
-            if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != fr->format) {
-                if (sws_) sws_freeContext(sws_);
-                sws_ = sws_getContext(w, h, (AVPixelFormat)fr->format,
-                                      w, h, AV_PIX_FMT_RGBA,
-                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
-                swsW_ = w; swsH_ = h; swsFmt_ = fr->format;
-                if (!sws_) {
-                    PP_ERROR("sws_getContext 失败 (fmt=%d)", fr->format);
-                    av_frame_unref(fr);
-                    continue;
+                auto vf = std::make_shared<VideoFrame>();
+                vf->w = w;
+                vf->h = h;
+                vf->pitch = w * 4;
+                vf->rgba.resize((size_t)vf->pitch * h);
+                vf->pts = pts;
+                vf->duration = dur;
+                vf->serial = serial;
+                vf->index = frameIndex_.fetch_add(1);
+
+                uint8_t* dst[4] = {vf->rgba.data(), nullptr, nullptr, nullptr};
+                int dstLs[4] = {vf->pitch, 0, 0, 0};
+                sws_scale(sws_, fr->data, fr->linesize, 0, h, dst, dstLs);
+                av_frame_unref(fr);
+
+                /* 入队；队列满则等待（seek/abort 时立刻放弃） */
+                {
+                    std::unique_lock<std::mutex> lk(vfMu_);
+                    vfCv_.wait_for(lk, std::chrono::milliseconds(50), [&] {
+                        return abort_.load() || seekReq_.load() ||
+                               (int64_t)vframes_.size() < VIDEO_QUEUE_MAX_FRAMES;
+                    });
+                    if (abort_.load() || seekReq_.load()) return false;
+                    if (serial != vq_.serial()) return false;   /* flush 作废 */
+                    vframes_.push_back(vf);
+                }
+                {
+                    std::lock_guard<std::mutex> lk(statMu_);
+                    decodedFrames_++;
                 }
             }
+            return true;
+        };
 
-            auto vf = std::make_shared<VideoFrame>();
-            vf->w = w;
-            vf->h = h;
-            vf->pitch = w * 4;
-            vf->rgba.resize((size_t)vf->pitch * h);
-            vf->pts = pts;
-            vf->duration = dur;
-            vf->serial = serial;
-            vf->index = frameIndex_.fetch_add(1);
-
-            uint8_t* dst[4] = {vf->rgba.data(), nullptr, nullptr, nullptr};
-            int dstLs[4] = {vf->pitch, 0, 0, 0};
-            sws_scale(sws_, fr->data, fr->linesize, 0, h, dst, dstLs);
-            av_frame_unref(fr);
-
-            /* 入队；队列满则等待（seek/abort 时立刻放弃） */
-            {
-                std::unique_lock<std::mutex> lk(vfMu_);
-                vfCv_.wait_for(lk, std::chrono::milliseconds(50), [&] {
-                    return abort_.load() || seekReq_.load() ||
-                           (int64_t)vframes_.size() < VIDEO_QUEUE_MAX_FRAMES;
-                });
-                if (abort_.load() || seekReq_.load()) break;
-                if (serial != vq_.serial()) break;   /* flush 作废 */
-                vframes_.push_back(vf);
+        /* 正确的送包顺序：先抽干已就绪的帧，再送（必要时重发）。
+         * 旧实现在 EAGAIN 时直接 av_packet_unref 丢包 —— 那是错的处理方式：
+         * EAGAIN 只表示解码器输入缓冲满，必须先 receive 出帧腾出空间，
+         * 然后**重发同一个包**。旧写法会丢帧与时间戳（尤其高码率/低帧率素材）。 */
+        const bool isDrain = (pkt->data == nullptr);
+        if (!drainDecoder()) continue;
+        int sret = avcodec_send_packet(vCtx_, isDrain ? nullptr : pkt);
+        if (sret == AVERROR(EAGAIN)) {
+            if (!drainDecoder()) {
+                if (!isDrain) av_packet_unref(pkt);
+                continue;
             }
-            {
-                std::lock_guard<std::mutex> lk(statMu_);
-                decodedFrames_++;
-            }
+            sret = avcodec_send_packet(vCtx_, isDrain ? nullptr : pkt);
         }
+        if (!isDrain) av_packet_unref(pkt);
+        if (sret < 0 && sret != AVERROR(EAGAIN) && sret != AVERROR_EOF)
+            PP_DEBUG("avcodec_send_packet 返回 %d（本包被丢弃）", sret);
+        if (!drainDecoder()) continue;
     }
     av_frame_free(&fr);
     av_packet_free(&pkt);
@@ -588,6 +630,12 @@ void Player::audioDecodeLoop() {
     std::vector<uint8_t> outBuf;
     double nextPts = 0.0;
     int lastQSerial = -1;
+    /* swr 的输入侧参数（格式/采样率/声道数）会被记下来，变更时重建。
+     * 旧实现只判断 `!swr_`，所以素材中途换格式（部分容器/拼接流）会继续用旧
+     * 转换上下文，导致音高/速度错误。 */
+    int  swrInFmt  = -1;
+    int  swrInRate = 0;
+    int  swrInCh   = 0;
 
     while (!abort_) {
         int serial = 0;
@@ -642,6 +690,11 @@ void Player::audioDecodeLoop() {
             const int inRate = fr->sample_rate > 0 ? fr->sample_rate : outSampleRate_;
             if (inRate <= 0) { av_frame_unref(fr); continue; }
 
+            /* 输入侧参数变了就重建 swr（不是只在第一次建） */
+            if (swr_ && (swrInFmt != (int)fr->format || swrInRate != inRate ||
+                         swrInCh != inLayout.nb_channels)) {
+                swr_free(&swr_);
+            }
             if (!swr_) {
                 if (swr_alloc_set_opts2(&swr_, &outLayout, AV_SAMPLE_FMT_S16, outSampleRate_,
                                         &inLayout, (AVSampleFormat)fr->format,
@@ -654,6 +707,9 @@ void Player::audioDecodeLoop() {
                     av_frame_unref(fr);
                     continue;
                 }
+                swrInFmt  = (int)fr->format;
+                swrInRate = inRate;
+                swrInCh   = inLayout.nb_channels;
             }
 
             int maxOut = (int)av_rescale_rnd(swr_get_delay(swr_, inRate) + fr->nb_samples,
@@ -791,16 +847,9 @@ bool Player::pumpFrame() {
     vfCv_.notify_one();
 
     if (!pick) {
-        /* EOF 判定：demux 结束 + 队列空 */
-        if (!eof_.load() && !vframes_.empty()) {
-            /* 仍有待显示帧 */
-        }
-        bool demuxDone = false;
-        {
-            std::lock_guard<std::mutex> lk(vfMu_);
-            demuxDone = vframes_.empty() && vq_.count() == 0 && vq_.aborted() == false;
-        }
-        (void)demuxDone;
+        /* 没有到点可显示的帧：本轮什么都不做。
+         * 原先这里有一段"EOF 判定"死代码：在**锁外**读 vframes_（数据竞争），
+         * 算出的 demuxDone 又用 (void) 直接丢弃。真正的结束判定在 finished()。 */
         return false;
     }
 

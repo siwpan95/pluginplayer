@@ -6,6 +6,7 @@
  */
 #include <string>
 #include <vector>
+#include <map>
 #include <SDL3/SDL.h>
 
 #include "player_plugin.h"
@@ -62,6 +63,13 @@ private:
 
     std::vector<PluginSlot> slots_;
     int                     nextSlot_ = 1;
+
+    /* 插件完整性清单（可选）。<pluginDir>/manifest.sha256，每行
+     *   "<64 位小写 sha256>  <文件名>"
+     * '#' 开头为注释。**文件存在时**，未列出或哈希不符的插件会被拒绝加载；
+     * 文件不存在时不做校验（并会在日志里说明"未启用完整性校验"）。 */
+    bool                             manifestEnabled_ = false;
+    std::map<std::string, std::string> manifest_;   /* 小写文件名 -> sha256 */
 };
 
 } // namespace pp

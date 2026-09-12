@@ -6,6 +6,7 @@
  * 选项:
  *   --help, -h              显示帮助
  *   --list-plugins          列出插件加载报告后退出
+ *   --write-plugin-manifest 生成 plugins/manifest.sha256（插件完整性清单）后退出
  *   --no-audio              不打开音频设备（静音播放 / 无音频环境下使用）
  *   --hidden                不显示窗口（配合控制通道做无人值守控制）
  *   --allow-network-input   允许打开 http/rtsp/UNC 等网络输入（默认拒绝）
@@ -95,6 +96,7 @@ static void printHelp() {
         "选项:\n"
         "  -h, --help            显示本帮助\n"
         "  --list-plugins        列出插件加载报告后退出\n"
+        "  --write-plugin-manifest  生成 plugins/manifest.sha256 完整性清单后退出\n"
         "  --no-audio            不打开音频设备\n"
         "  --hidden              不显示窗口（配合控制通道做无人值守控制）\n"
         "  --allow-network-input 允许打开 http/rtsp/UNC 等网络输入（默认拒绝）\n"
@@ -130,6 +132,7 @@ int main(int argc, char** argv) {
     bool allowNetworkInput = false;
     bool selfTest = false;
     bool listPlugins = false;
+    bool writePluginManifest = false;
     int  rpcPort = 7911;
     double startSec = -1.0;
     double volume = 1.0;
@@ -194,6 +197,7 @@ int main(int argc, char** argv) {
             frames = (int)n;
         }
         else if (a == "--out") outDir = next("--out");
+        else if (a == "--write-plugin-manifest") writePluginManifest = true;
         else if (a == "--write-dir") writeDirs.push_back(next("--write-dir"));
         else if (a == "--rpc-port") {
             const char* v = next("--rpc-port");
@@ -243,9 +247,10 @@ int main(int argc, char** argv) {
     {
         HMODULE k32 = ::GetModuleHandleA("kernel32.dll");
         typedef BOOL (WINAPI *SetDefaultDllDirsFn)(DWORD);
+        /* 经 void* 中转：直接函数指针互转会触发 -Wcast-function-type */
         SetDefaultDllDirsFn fn = k32
             ? reinterpret_cast<SetDefaultDllDirsFn>(
-                  ::GetProcAddress(k32, "SetDefaultDllDirectories"))
+                  reinterpret_cast<void*>(::GetProcAddress(k32, "SetDefaultDllDirectories")))
             : nullptr;
         if (!fn) {
             PP_WARN("本机不支持 SetDefaultDllDirectories，DLL 搜索路径未加固（建议升级系统）");
@@ -259,7 +264,7 @@ int main(int argc, char** argv) {
 #endif
 
     App app;
-    if (!app.init(winW, winH, hidden || listPlugins || selfTest, !noAudio)) {
+    if (!app.init(winW, winH, hidden || listPlugins || selfTest || writePluginManifest, !noAudio)) {
         fprintf(stderr, "初始化失败\n");
         return 3;
     }
@@ -271,6 +276,37 @@ int main(int argc, char** argv) {
 
     /* 插件：发现 -> 加载 -> 启动 */
     int found = app.plugins().discover(app.host().pluginDir());
+
+    if (writePluginManifest) {
+        /* 生成插件完整性清单。注意：必须在 loadAll 之前做 ——
+         * 清单一旦存在，未列出的插件就会被拒绝加载。 */
+        std::string dir = app.host().pluginDir();
+        std::string mf  = pathJoin(dir, "manifest.sha256");
+        std::string out = "# PluginPlayer 插件完整性清单\n"
+                          "# 格式: <sha256>  <文件名>（与 sha256sum 兼容）\n"
+                          "# 生成: pluginplayer.exe --write-plugin-manifest\n"
+                          "# 提交/发布前请重新生成；新增插件后若不同步更新，该插件会被拒绝加载。\n";
+        int n = 0, bad = 0;
+        for (const auto& s : app.plugins().slots()) {
+            std::string h;
+            if (!sha256FileHex(s.path, &h)) { bad++; continue; }
+            out += h + "  " + s.file + "\n";
+            n++;
+        }
+        FILE* f = fopen(mf.c_str(), "wb");
+        if (!f) {
+            fprintf(stderr, "无法写入 %s\n", mf.c_str());
+            app.shutdown();
+            return 5;
+        }
+        fwrite(out.data(), 1, out.size(), f);
+        fclose(f);
+        printf("%s\n已写入 %s（%d 个插件，失败 %d）\n", out.c_str(), mf.c_str(), n, bad);
+        printf("提示：提交前把这个文件一起纳入版本控制，插件被改动就会被发现。\n");
+        app.shutdown();
+        return bad == 0 ? 0 : 5;
+    }
+
     int okCnt = app.plugins().loadAll(&app.host());
     app.plugins().startAll(&app.host());
 

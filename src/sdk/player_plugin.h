@@ -33,6 +33,43 @@ extern "C" {
 #endif
 
 /* ===========================================================================
+ * ABI 与版本演进规则（**改这个头文件之前请先读完这一段**）
+ * ===========================================================================
+ *
+ * 1) 唯一的契约是 `abi_version` 的**严格相等**
+ *    宿主检查三个地方：插件导出的 `pp_plugin_abi_version()`、
+ *    `PP_Plugin.abi_version`、以及 `PP_HostApi.struct_size`（宿主自己那份）。
+ *    任何一处不符即拒绝加载。**不做部分兼容。**
+ *
+ * 2) 因此：对下面任何一个结构体做**任何**字段改动（哪怕只是追加一个字段），
+ *    都必须同时递增 `PP_ABI_VERSION`，并**重新编译全部插件**。
+ *    涉及的结构体：
+ *      - PP_HostApi      （宿主填，插件读；已有 struct_size 字段）
+ *      - PP_Plugin       （插件填，宿主读）
+ *      - PP_MediaInfo    （插件分配，宿主填充）
+ *      - PP_PlaybackStats（插件分配，宿主填充）
+ *      - PP_EventCtx     （宿主在栈上构造后传给插件）
+ *
+ * 3) 为什么 PP_MediaInfo / PP_PlaybackStats / PP_EventCtx **没有** struct_size：
+ *    它们是"宿主填充"的 out 参数，**由插件分配**。宿主无法在不越界的前提下
+ *    知道插件实际分配了多大（插件通常写 `PP_MediaInfo mi{};`，此时 size 字段
+ *    会是 0）。所以在这三个结构上放 size 字段并不能提供真实保护 ——
+ *    真正的保护只能是"版本严格相等"。
+ *
+ * 4) 如果将来确实需要"宿主比插件新也能跑"的部分兼容，正确做法是：
+ *      ① 让**调用方**先把 `struct_size` 写成 `sizeof(自己这份)`；
+ *      ② 宿主据此裁剪写入（只写落在 sizeof 之内的字段），并允许 struct_size
+ *         **小于**宿主的 sizeof；
+ *      ③ 同时为零初始化的情况保留一条兼容路径（struct_size == 0 视为旧版）。
+ *    这需要改掉**所有**调用点（插件里 7 处以上），收益有限、回归面不小，
+ *    因此当前版本刻意不做 —— 记录在此，供将来决策。
+ *
+ * 5) 当前状态：`PP_ABI_VERSION = 1`，宿主与插件必须来自同一份头文件。
+ *    构建脚本 `build.py` 会一起编译宿主与全部插件，所以这在发布流程里是自然的。
+ * ===========================================================================
+ */
+
+/* ===========================================================================
  * 版本与导出宏
  * =========================================================================== */
 
@@ -290,6 +327,15 @@ typedef struct PP_HostApi {
     int         (*dispatch)(PP_Host *h, const char *topic, void *payload, int payload_size);
     /** 查询某主题的注册分发模式。 */
     int         (*topic_mode)(PP_Host *h, const char *topic);
+    /**
+     * 声明**插件自定义主题**的分发模式（PP_DISPATCH_EMIT / WATERFALL / SERIAL / BAIL）。
+     * 不调用的话，非内置主题只能走 EMIT，downstream 的 dispatch() 也就拿不到
+     * waterfall/BAIL 语义。注册记在调用它的插件名下，卸载时自动清除。
+     *
+     * 注意：这是 PP_HostApi 的**新增字段，追加在末尾** —— 插件加载时会校验
+     * abi_version 与 struct_size，因此旧插件（用旧头文件编译）不受影响。
+     */
+    int         (*set_topic_mode)(PP_Host *h, const char *topic, int mode);
 
     /* -- 服务（对齐 Cordis 的 ctx.<key>） ------------------------------------ */
     int         (*register_service)(PP_Host *h, const char *name, const char *version, void *iface);

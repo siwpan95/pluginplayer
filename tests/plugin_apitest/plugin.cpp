@@ -110,6 +110,40 @@ static int cmdCheck(PP_Host* h, int argc, const char** argv, void* user) {
         }
     }
 
+    /* 6) set_topic_mode：自定义主题应能声明非 EMIT 模式（旧版无处可声明） */
+    {
+        const char* kTopic = "apitest.custom";
+        int before = g_api->topic_mode(h, kTopic);
+        int rc = g_api->set_topic_mode(h, kTopic, PP_DISPATCH_WATERFALL);
+        int after = g_api->topic_mode(h, kTopic);
+        if (rc != 0 || after != PP_DISPATCH_WATERFALL) {
+            say("FAIL set_topic_mode 未生效（rc=%d, before=%d, after=%d）", rc, before, after);
+            fails++;
+        } else {
+            say("PASS set_topic_mode 生效（%d -> %d）", before, after);
+        }
+        /* 非法模式必须被拒 */
+        if (g_api->set_topic_mode(h, kTopic, 999) == 0) {
+            say("FAIL 非法模式值竟然被接受");
+            fails++;
+        } else {
+            say("PASS 非法模式值被拒");
+        }
+    }
+
+    /* 7) 写入白名单：写 exeDir 之外必须失败（宿主强制，插件无法绕过） */
+    {
+        const char* outside = "C:/Windows/Temp/pp_apitest_should_fail.png";
+        static uint8_t px[4 * 4 * 4] = {0};
+        int rc = g_api->save_png(h, outside, px, 4, 4, 16);
+        if (rc == 0) {
+            say("FAIL 越界写文件竟然成功: %s", outside);
+            fails++;
+        } else {
+            say("PASS 越界写文件被拒");
+        }
+    }
+
     say("api.check 结果: %s（失败 %d 项，帧回调 %d 次）",
         fails == 0 ? "ALL PASS" : "FAILED", fails, g_frameHits);
     return fails;

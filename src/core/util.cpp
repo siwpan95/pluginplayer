@@ -300,7 +300,68 @@ std::vector<std::string> listDir(const std::string& dir, const std::string& extF
     return out;
 }
 
-/* ======================= 极简 JSON ======================= */
+/* ======================= 文件 SHA-256 ======================= */
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <bcrypt.h>
+#endif
+
+bool sha256FileHex(const std::string& path, std::string* outHexLower) {
+#ifdef _WIN32
+    if (!outHexLower) return false;
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0)
+        return false;
+    DWORD objLen = 0, cb = 0;
+    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(objLen),
+                          &cb, 0) != 0) {
+        BCryptCloseAlgorithmProvider(alg, 0);
+        return false;
+    }
+    std::vector<unsigned char> obj(objLen ? objLen : 1);
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    if (BCryptCreateHash(alg, &hash, obj.data(), objLen, nullptr, 0, 0) != 0) {
+        BCryptCloseAlgorithmProvider(alg, 0);
+        return false;
+    }
+    bool ok = false;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f) {
+        std::vector<unsigned char> buf(1 << 20);
+        size_t n;
+        ok = true;
+        while ((n = fread(buf.data(), 1, buf.size(), f)) > 0) {
+            if (BCryptHashData(hash, buf.data(), (ULONG)n, 0) != 0) { ok = false; break; }
+        }
+        if (ferror(f)) ok = false;
+        fclose(f);
+    }
+    unsigned char digest[32];
+    if (ok && BCryptFinishHash(hash, digest, sizeof(digest), 0) != 0) ok = false;
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    if (!ok) return false;
+    static const char* hx = "0123456789abcdef";
+    std::string s;
+    s.reserve(64);
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        s.push_back(hx[digest[i] >> 4]);
+        s.push_back(hx[digest[i] & 0x0F]);
+    }
+    *outHexLower = s;
+    return true;
+#else
+    (void)path;
+    if (outHexLower) outHexLower->clear();
+    return false;   /* 非 Windows 平台暂未提供：调用方应据此跳过校验并告警 */
+#endif
+}
+
+/* ======================= JSON 转义 ======================= */
 
 std::string jsonEscape(const std::string& s) {
     std::string o;
@@ -319,49 +380,244 @@ std::string jsonEscape(const std::string& s) {
     return o;
 }
 
-static bool findKey(const std::string& json, const char* key, size_t& pos) {
-    std::string pat = std::string("\"") + key + "\"";
-    pos = json.find(pat);
-    if (pos == std::string::npos) return false;
-    pos = json.find(':', pos + pat.size());
-    if (pos == std::string::npos) return false;
-    pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+/* ======================= 严格 JSON 取值 =======================
+ * 不用第三方库，但要做成真正的词法扫描（见 util.h 的说明）。
+ * 深度上限、重复键、非法字面量一律判非法。
+ * ============================================================== */
+
+static const int kMaxJsonDepth = 32;
+
+static bool jIsWs(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+static bool jIsDigit(char c) { return c >= '0' && c <= '9'; }
+
+static void jSkipWs(const std::string& s, size_t& i) {
+    while (i < s.size() && jIsWs(s[i])) ++i;
+}
+
+/** 解析一个 JSON 字符串（i 指向起始的 '"'）；out 可传 nullptr 表示只跳过。 */
+static bool jParseString(const std::string& s, size_t& i, std::string* out) {
+    if (i >= s.size() || s[i] != '"') return false;
+    ++i;
+    std::string o;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == '"') { ++i; if (out) *out = o; return true; }
+        if ((unsigned char)c < 0x20) return false;      /* 未转义的控制字符：非法 */
+        if (c != '\\') { o.push_back(c); ++i; continue; }
+        if (i + 1 >= s.size()) return false;
+        char e = s[i + 1];
+        switch (e) {
+            case '"':  o.push_back('"');  i += 2; break;
+            case '\\': o.push_back('\\'); i += 2; break;
+            case '/':  o.push_back('/');  i += 2; break;
+            case 'b':  o.push_back('\b'); i += 2; break;
+            case 'f':  o.push_back('\f'); i += 2; break;
+            case 'n':  o.push_back('\n'); i += 2; break;
+            case 'r':  o.push_back('\r'); i += 2; break;
+            case 't':  o.push_back('\t'); i += 2; break;
+            case 'u': {
+                if (i + 5 >= s.size()) return false;
+                unsigned cp = 0;
+                for (int k = 0; k < 4; ++k) {
+                    char h = s[i + 2 + k];
+                    unsigned d;
+                    if (h >= '0' && h <= '9')      d = (unsigned)(h - '0');
+                    else if (h >= 'a' && h <= 'f') d = (unsigned)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') d = (unsigned)(h - 'A' + 10);
+                    else return false;
+                    cp = (cp << 4) | d;
+                }
+                /* 只处理 BMP；代理项按 UTF-8 原样输出（够本项目的控制通道用） */
+                if (cp < 0x80) {
+                    o.push_back((char)cp);
+                } else if (cp < 0x800) {
+                    o.push_back((char)(0xC0 | (cp >> 6)));
+                    o.push_back((char)(0x80 | (cp & 0x3F)));
+                } else {
+                    o.push_back((char)(0xE0 | (cp >> 12)));
+                    o.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                    o.push_back((char)(0x80 | (cp & 0x3F)));
+                }
+                i += 6;
+                break;
+            }
+            default: return false;
+        }
+    }
+    return false;   /* 未闭合 */
+}
+
+/** 跳过任意一个合法 JSON 值（不递归下降进对象内部，只保证整体合法）。 */
+static bool jSkipValue(const std::string& s, size_t& i, int depth) {
+    if (depth > kMaxJsonDepth) return false;
+    jSkipWs(s, i);
+    if (i >= s.size()) return false;
+    char c = s[i];
+    if (c == '"') return jParseString(s, i, nullptr);
+    if (c == '{' || c == '[') {
+        char close = (c == '{') ? '}' : ']';
+        ++i;
+        jSkipWs(s, i);
+        if (i < s.size() && s[i] == close) { ++i; return true; }
+        for (;;) {
+            if (c == '{') {
+                std::string k;
+                if (!jParseString(s, i, &k)) return false;
+                jSkipWs(s, i);
+                if (i >= s.size() || s[i] != ':') return false;
+                ++i;
+            }
+            if (!jSkipValue(s, i, depth + 1)) return false;
+            jSkipWs(s, i);
+            if (i >= s.size()) return false;
+            if (s[i] == ',') { ++i; jSkipWs(s, i); continue; }
+            if (s[i] == close) { ++i; return true; }
+            return false;
+        }
+    }
+    if (c == 't') { if (s.compare(i, 4, "true")  == 0) { i += 4; return true; } return false; }
+    if (c == 'f') { if (s.compare(i, 5, "false") == 0) { i += 5; return true; } return false; }
+    if (c == 'n') { if (s.compare(i, 4, "null")  == 0) { i += 4; return true; } return false; }
+    /* 数字：严格按 JSON number 文法 */
+    size_t st = i;
+    if (i < s.size() && s[i] == '-') ++i;
+    if (i >= s.size() || !jIsDigit(s[i])) return false;
+    if (s[i] == '0') { ++i; }
+    else { while (i < s.size() && jIsDigit(s[i])) ++i; }
+    if (i < s.size() && s[i] == '.') {
+        ++i;
+        if (i >= s.size() || !jIsDigit(s[i])) return false;
+        while (i < s.size() && jIsDigit(s[i])) ++i;
+    }
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        ++i;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+        if (i >= s.size() || !jIsDigit(s[i])) return false;
+        while (i < s.size() && jIsDigit(s[i])) ++i;
+    }
+    return i > st;
+}
+
+bool jsonParseObject(const std::string& json,
+                     std::vector<std::pair<std::string, std::string>>* out,
+                     std::string* err) {
+    if (out) out->clear();
+    size_t i = 0;
+    jSkipWs(json, i);
+    if (i >= json.size() || json[i] != '{') {
+        if (err) *err = "不是 JSON 对象";
+        return false;
+    }
+    ++i;
+    jSkipWs(json, i);
+    if (i < json.size() && json[i] == '}') {
+        ++i;
+        jSkipWs(json, i);
+        if (i != json.size()) { if (err) *err = "对象之后有多余内容"; return false; }
+        return true;
+    }
+    for (;;) {
+        jSkipWs(json, i);
+        std::string key;
+        if (!jParseString(json, i, &key)) {
+            if (err) *err = "键不是合法字符串";
+            return false;
+        }
+        jSkipWs(json, i);
+        if (i >= json.size() || json[i] != ':') {
+            if (err) *err = "键 \"" + key + "\" 后缺少 ':'";
+            return false;
+        }
+        ++i;
+        jSkipWs(json, i);
+        size_t vstart = i;
+        size_t vt = i;
+        if (!jSkipValue(json, vt, 0)) {
+            if (err) *err = "键 \"" + key + "\" 的值非法";
+            return false;
+        }
+        if (out) {
+            for (const auto& kv : *out) {
+                if (kv.first == key) {
+                    if (err) *err = "重复键: " + key;
+                    return false;
+                }
+            }
+            out->push_back({key, json.substr(vstart, vt - vstart)});
+        }
+        i = vt;
+        jSkipWs(json, i);
+        if (i >= json.size()) { if (err) *err = "对象未闭合"; return false; }
+        if (json[i] == ',') { ++i; continue; }
+        if (json[i] == '}') { ++i; break; }
+        if (err) *err = "对象中出现意外字符";
+        return false;
+    }
+    jSkipWs(json, i);
+    if (i != json.size()) { if (err) *err = "对象之后有多余内容"; return false; }
     return true;
 }
 
 std::string jsonGetString(const std::string& json, const char* key, const std::string& def) {
-    size_t p;
-    if (!findKey(json, key, p)) return def;
-    if (p >= json.size() || json[p] != '"') return def;
-    p++;
-    std::string o;
-    while (p < json.size() && json[p] != '"') {
-        if (json[p] == '\\' && p + 1 < json.size()) {
-            char n = json[p + 1];
-            switch (n) {
-                case 'n': o.push_back('\n'); break;
-                case 'r': o.push_back('\r'); break;
-                case 't': o.push_back('\t'); break;
-                case '"': o.push_back('"');  break;
-                case '\\': o.push_back('\\'); break;
-                case '/': o.push_back('/');  break;
-                default: o.push_back(n);
-            }
-            p += 2;
-        } else {
-            o.push_back(json[p++]);
-        }
+    if (!key) return def;
+    std::vector<std::pair<std::string, std::string>> kvs;
+    if (!jsonParseObject(json, &kvs, nullptr)) return def;
+    for (const auto& kv : kvs) {
+        if (kv.first != key) continue;
+        if (kv.second.empty() || kv.second[0] != '"') return def;   /* 类型不符 */
+        size_t i = 0;
+        std::string v;
+        if (!jParseString(kv.second, i, &v)) return def;
+        return v;
     }
-    return o;
+    return def;
 }
 
 double jsonGetNumber(const std::string& json, const char* key, double def) {
-    size_t p;
-    if (!findKey(json, key, p)) return def;
-    char* end = nullptr;
-    double v = strtod(json.c_str() + p, &end);
-    return end == json.c_str() + p ? def : v;
+    if (!key) return def;
+    std::vector<std::pair<std::string, std::string>> kvs;
+    if (!jsonParseObject(json, &kvs, nullptr)) return def;
+    for (const auto& kv : kvs) {
+        if (kv.first != key) continue;
+        if (kv.second.empty() || kv.second[0] == '"') return def;   /* 字符串不算数字 */
+        const char* b = kv.second.c_str();
+        char* end = nullptr;
+        double v = strtod(b, &end);
+        if (end == b) return def;
+        while (end && *end && jIsWs(*end)) ++end;                    /* 允许尾随空白 */
+        if (end && *end != '\0') return def;                         /* 还有残留 → 非法 */
+        return v;
+    }
+    return def;
+}
+
+bool jsonGetStringArray(const std::string& json, const char* key,
+                        std::vector<std::string>* out) {
+    if (out) out->clear();
+    if (!key) return false;
+    std::vector<std::pair<std::string, std::string>> kvs;
+    if (!jsonParseObject(json, &kvs, nullptr)) return false;
+    const std::string* raw = nullptr;
+    for (const auto& kv : kvs) if (kv.first == key) { raw = &kv.second; break; }
+    if (!raw || raw->size() < 2 || (*raw)[0] != '[') return false;
+    /* 逐元素解析；元素必须都是字符串 */
+    size_t i = 0;
+    jSkipWs(*raw, i);
+    if (i >= raw->size() || (*raw)[i] != '[') return false;
+    ++i;
+    jSkipWs(*raw, i);
+    if (i < raw->size() && (*raw)[i] == ']') return true;   /* 空数组：合法 */
+    for (;;) {
+        jSkipWs(*raw, i);
+        std::string v;
+        if (!jParseString(*raw, i, &v)) return false;
+        if (out) out->push_back(v);
+        jSkipWs(*raw, i);
+        if (i >= raw->size()) return false;
+        if ((*raw)[i] == ',') { ++i; continue; }
+        if ((*raw)[i] == ']') { ++i; return true; }
+        return false;
+    }
 }
 
 /* ======================= PNG 写出 =======================

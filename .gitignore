@@ -15,9 +15,14 @@
 *.tar.gz
 *.tgz
 
-# ---- 本地基线备份（上线前 QA 抓的 dist 快照） ----
+# ---- 本地基线备份（上线前 QA 抓的 dist 快照；升级依赖前的 vendor 备份） ----
 /_dist_baseline_backup/
 /_dist_broken_*/
+/_vendor_backup_*/
+/_vendor_backup*
+
+# ---- 依赖缓存（fetch_deps.py 的下载/解压中间目录） ----
+/_deps/
 
 # ---- 运行期产物 ----
 /logs/

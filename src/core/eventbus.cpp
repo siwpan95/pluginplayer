@@ -22,7 +22,36 @@ static int defaultModeOf(const std::string& topic) {
 }
 
 int EventBus::topicMode(const char* topic) const {
-    return defaultModeOf(topic ? topic : "");
+    if (!topic) return PP_DISPATCH_EMIT;
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = modeOverride_.find(topic);
+    if (it != modeOverride_.end()) return it->second;
+    return defaultModeOf(topic);
+}
+
+int EventBus::setTopicMode(const std::string& topic, int mode, int owner) {
+    if (topic.empty()) return -1;
+    if (mode != PP_DISPATCH_EMIT && mode != PP_DISPATCH_WATERFALL &&
+        mode != PP_DISPATCH_SERIAL && mode != PP_DISPATCH_BAIL) return -1;
+    std::lock_guard<std::mutex> lk(mu_);
+    modeOverride_[topic] = mode;
+    modeOverrideOwner_[topic] = owner;
+    return 0;
+}
+
+int EventBus::clearTopicModesOf(int owner) {
+    std::lock_guard<std::mutex> lk(mu_);
+    int n = 0;
+    for (auto it = modeOverrideOwner_.begin(); it != modeOverrideOwner_.end();) {
+        if (it->second == owner) {
+            modeOverride_.erase(it->first);
+            it = modeOverrideOwner_.erase(it);
+            n++;
+        } else {
+            ++it;
+        }
+    }
+    return n;
 }
 
 int EventBus::subscribe(const std::string& topic, PP_EventFn fn, void* user, int owner) {
@@ -79,7 +108,7 @@ int EventBus::publish(PP_Host* host, const char* topic, const char* json) {
 
 int EventBus::dispatch(PP_Host* host, const char* topic, void* payload, int size) {
     if (!topic) return 0;
-    int mode = defaultModeOf(topic);
+    int mode = topicMode(topic);      /* 走覆盖表：插件自定义主题也能声明分发模式 */
     std::vector<Subscription> snap;
     {
         std::lock_guard<std::mutex> lk(mu_);

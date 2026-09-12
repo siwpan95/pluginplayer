@@ -2,6 +2,7 @@
 /* util.h — 日志与通用小工具 */
 #include <string>
 #include <vector>
+#include <utility>
 #include <cstdint>
 #include <cstdio>
 
@@ -66,10 +67,25 @@ bool pathIsInside(const std::string& child, const std::string& root);
  * 注意：普通本地路径（C:\a\b.mp4、/tmp/a.mp4、相对路径）都不会命中。 */
 bool isNetworkInput(const std::string& s);
 
-/* ---- 极简 JSON 取值（够用即可，不引入第三方库） ---- */
+/* ---- 严格 JSON 取值 ----
+ * 早期实现用 `find("\"key\"")` 做子串搜索，有三类问题：
+ *   1. 键名出现在**字符串值里**也会命中（{"path":"a\"id\"b"} 会误取 id）
+ *   2. 不校验合法性，非法输入被静默当默认值，容易出现"参数走私"
+ *   3. 重复键无语义（先出现的胜出）
+ * 现在改为真正的词法扫描：只认**顶层**键、正确处理转义、拒绝重复键与超深嵌套。 */
+bool jsonParseObject(const std::string& json,
+                     std::vector<std::pair<std::string, std::string>>* out,
+                     std::string* err);
 std::string jsonGetString(const std::string& json, const char* key, const std::string& def = "");
 double jsonGetNumber(const std::string& json, const char* key, double def = 0.0);
+/** 取顶层键的字符串数组（元素必须都是字符串）；缺键返回 false 且 out 清空。 */
+bool jsonGetStringArray(const std::string& json, const char* key,
+                        std::vector<std::string>* out);
 std::string jsonEscape(const std::string& s);
+
+/* ---- 文件哈希（用于插件完整性清单） ----
+ * 用系统 CSPRNG 同一套 bcrypt 的 SHA-256；不可用时返回 false。 */
+bool sha256FileHex(const std::string& path, std::string* outHexLower);
 
 /* ---- PNG 写出（内置实现：deflate stored + CRC32 + Adler32，无第三方依赖） ---- */
 bool writePngRGBA(const std::string& path, const uint8_t* rgba, int w, int h, int pitch);

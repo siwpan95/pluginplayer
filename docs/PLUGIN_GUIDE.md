@@ -95,6 +95,29 @@ F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
 想纳入常规构建，把目录名加进 `build.py` 的 `PLUGINS` 列表（约定源码路径为
 `src/plugins/<name>/plugin.cpp`）。
 
+> **注意完整性清单**：如果 `dist/plugins/manifest.sha256` 存在（发布版默认会有），
+> 新加的 DLL **必须**先同步清单，否则会被宿主拒绝加载并在报告里标 `FAILED`：
+>
+> ```bat
+> :: 重新生成清单（把当前 plugins/ 下所有 DLL 都登记进去）
+> dist\pluginplayer.exe --write-plugin-manifest
+> ```
+>
+> 清单格式与 `sha256sum` 兼容（`<sha256>  <文件名>`，`#` 为注释）。
+> 它只能发现"文件被改过"，不证明来源可信；但对"发布物被替换/被塞东西"是有效的。
+
+### 2b. 声明自定义主题的分发模式（可选）
+
+宿主内置主题（`video.frame` = waterfall、`ui.key` = bail 等）的模式是写死的。
+插件如果自己 `publish` 一个新主题并希望订阅方也能用 waterfall/BAIL 语义，
+需要显式声明，否则该主题只能是 EMIT：
+
+```cpp
+api->set_topic_mode(host, "myplugin.stage", PP_DISPATCH_WATERFALL);
+```
+
+注册记在当前插件名下，卸载时自动清除（与其它注册一致）。
+
 ### 3. 必须遵守的约定
 
 1. **入口必须在全局作用域用 `PP_PLUGIN_DECL`**，宏里已经带了 `extern "C"`；
@@ -137,7 +160,7 @@ F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
 | 日志 | `log(host, level, fmt, ...)` |
 | 播放控制 | `play/pause/toggle_pause/stop`、`seek_absolute/seek_relative`、`set_volume/get_volume/set_muted/is_muted`、`set_speed/is_paused`、`get_position/get_duration`、`open_media` |
 | 状态查询 | `get_media_info(PP_MediaInfo*)`、`get_stats(PP_PlaybackStats*)` |
-| 事件 | `subscribe(topic, fn, user)` → sub_id、`unsubscribe(id)`、`publish(topic, json)`、`dispatch(topic, payload, size)`、`topic_mode(topic)` |
+| 事件 | `subscribe(topic, fn, user)` → sub_id、`unsubscribe(id)`、`publish(topic, json)`、`dispatch(topic, payload, size)`、`topic_mode(topic)`、`set_topic_mode(topic, mode)` |
 | 服务 | `register_service(name, ver, iface)`、`unregister_service`、`get_service(name)`、`list_services` |
 | 命令 | `register_command(name, usage, fn, user)`、`unregister_command`、`invoke_command(name, argc, argv)`、`list_commands` |
 | 帧 | `set_frame_processor(fn, user, priority)`、`remove_frame_processor(id)`、`acquire_frame/release_frame` |

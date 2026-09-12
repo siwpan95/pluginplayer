@@ -45,6 +45,10 @@ F:\Python314\python.exe build.py
 :: 2b) 冒烟测试（编译并运行 tests/ 下两个冒烟程序，几秒钟）
 F:\Python314\python.exe build.py --smoke
 
+:: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
+::     实测产物 17 个文件 / 127 MB（不带 --release 时 dist/ 会累积日志与自检证据）
+F:\Python314\python.exe build.py --release
+
 :: 3) 播放（把视频拖到 run.bat 上，或：）
 dist\pluginplayer.exe 你的视频.mp4
 
@@ -70,9 +74,14 @@ cd host-js && npm install && node src\index.mjs --port 7911
 | `--rpc-token HEX` | 指定控制通道令牌（默认每次启动随机生成） |
 | `--hidden` | 不显示窗口（配合控制通道做无人值守控制） |
 | `--write-dir DIR` | 追加插件可写目录（默认只允许 `dist/`，可重复） |
+| `--write-plugin-manifest` | 生成 `plugins/manifest.sha256` 完整性清单后退出 |
 | `--allow-network-input` | 允许打开 `http/rtsp/UNC` 等网络输入（**默认拒绝**） |
 | `--size WxH` | 初始窗口尺寸（默认 1280x720，范围 160..8192） |
 | `--selftest --frames N --out DIR` | 无人值守自检 |
+
+`build.py` 的常用开关：`--release`（干净重建 + 清理运行期产物 + 生成完整性清单）、
+`--smoke`（冒烟测试）、`--apitest`（编译插件 API 回归插件）、`--clean`、`--debug`。
+`tools/fetch_deps.py --check-update` 只发 HEAD 请求，就能告诉你上游依赖有没有更新。
 
 所有数值参数都会做严格校验，非法值直接报错退出（`exit 2`），不会带着越界值继续跑。
 
@@ -91,6 +100,9 @@ cd host-js && npm install && node src\index.mjs --port 7911
 | 并发连接上限 | 8 |
 | 事件推送 | 只推给已认证连接 |
 | 插件写文件 | 只允许写进 `dist/`（用 `--write-dir` 追加白名单） |
+| 插件完整性 | 可选清单 `plugins/manifest.sha256`：**文件存在即启用**，未列出或 SHA-256 不符的插件拒绝加载（`--write-plugin-manifest` 生成） |
+| DLL 搜索路径 | 启动时 `SetDefaultDllDirectories`，把当前工作目录移出 DLL 解析顺序 |
+| 依赖下载 | `tools/fetch_deps.py` 解压前校验 SHA-256，并拒绝含 `..`/绝对路径的归档条目（Zip Slip） |
 | 网络输入 | `http/https/rtsp/file/UNC` 等**默认拒绝**，需 `--allow-network-input` |
 | 网页控制页 `03-web-remote` | **默认关闭**，需 `PP_WEB_REMOTE=1` 或 `config.enabled=true` 才启动；启动后要求 Host/Origin 白名单 + 令牌 + JSON 请求体 |
 
@@ -116,6 +128,20 @@ cd host-js && npm install && node src\index.mjs --port 7911
 > 选 gyan.dev 的 `full_build-shared` 是因为它同时提供
 > **MinGW 导入库 `lib/*.dll.a` + 完整头文件（含 configure 生成的 `avconfig.h`/`ffversion.h`）+ 全套 DLL**，
 > 且与本机 MinGW 同为 GCC 16.1.0，ABI 完全匹配 —— 开箱即可链接，不需要自己编译 FFmpeg。
+
+### 依赖的更新与 CVE（**发布前请看这段**）
+
+- `tools/fetch_deps.py --check-update` 只发 HEAD 请求，比较上游 `Content-Length`
+  与本机档案大小，告诉你"现在有没有值得重新抓取的更新"。抓取用 `--refresh`。
+- 抓取/校验流程：解压**前**比对 SHA-256 与 `DEPS_SHA256`；不命中会告警并打印实测哈希；
+  解压前还会用 `7z l -slt` 扫描条目，拒绝含 `..` 或绝对路径的归档条目（Zip Slip）。
+- 下载改为"先写 `.part`、成功且长度匹配才改名"，避免半途失败留下"够大但损坏"的缓存。
+- **CVE 现状（2026-09-12 核查）**：SDL3 3.4.16 未发现已知 CVE；
+  **FFmpeg 9.0.1 有多个已公开 CVE**，多条与"用构造的媒体文件触发"相关
+  （详见「已知限制」）。当时核查的结果是**上游构建未更新**
+  （`Content-Length` 与本机档案字节数相同、前 8.7 MB 前缀哈希一致），
+  因此"重新抓取"暂时解决不了这个问题 —— 需要等上游发布新版本。
+  但 SHA-256 钉值保证：**上游一旦变化就会立刻显性报出来**。
 
 ---
 
@@ -149,7 +175,7 @@ pluginplayer/
 ├─ .gitignore                          排除构建产物、第三方依赖、运行期产物与令牌文件
 ├─ docs/ARCHITECTURE.md                线程模型 / A-V 同步 / 协议 / 安全模型 / 踩坑记录
 ├─ docs/PLUGIN_GUIDE.md                两种插件的开发指南（含可编译示例）
-└─ dist/                               产物：exe(~470KB) + DLL + plugins/ + config/
+└─ dist/                               产物：exe(~510KB) + DLL + plugins/ + config/
 ```
 
 `examples/hello_plugin` 已实测：按指南里的命令行编译出 71KB 的 DLL，丢进 `dist/plugins/`
@@ -295,7 +321,49 @@ pluginplayer/
 | 未认证的裸连接 | 拿不到任何方法、也收不到任何事件 |
 | `player.open http://...`（6 种网络形式） | 全部被拒（`--allow-network-input` 可放行） |
 | `snapshot` 写项目外目录 / 目录穿越 | 被拒（`return=-1` 并打 WARN），白名单内正常写出 |
-| 控制通道压力：7 并发 × 8 秒 | 3392 次请求全部成功，**423 req/s**，p50 16.6 ms / p95 17.4 ms，无崩溃无异常读数
+| 控制通道压力：7 并发 × 8 秒 | 3431 次请求全部成功，**428 req/s**，p50 16.6 ms / p95 17.4 ms / max 19.2 ms，无崩溃无异常读数 |
+
+### 7. 严格 JSON 解析（9/9 通过）
+
+控制通道的 JSON 取值已从"子串搜索"换成严格词法扫描（只认顶层键、正确处理转义、
+拒绝重复键与超深嵌套）：
+
+```
+[PASS] 重复键被拒                    {"ok":false,"error":"非法 JSON 请求: 重复键: method"}
+[PASS] 未闭合 JSON 被拒              {"ok":false,"error":"非法 JSON 请求: 对象未闭合"}
+[PASS] 尾部垃圾被拒                  {"ok":false,"error":"非法 JSON 请求: 对象之后有多余内容"}
+[PASS] 键名出现在值里不会误命中（仍执行 ping）  ← 旧实现在这里会调到 params 里那个假 method
+[PASS] args 含非字符串被拒            {"ok":false,"error":"args 必须是字符串数组"}
+[PASS] args 为字符串数组可正常执行
+[PASS] 深嵌套不崩溃且被拒            （5000 层数组，深度上限 32 直接拒绝）
+[PASS] 深嵌套之后服务仍正常
+[PASS] 字符串形式的 id 不会崩（id 退回 0）
+```
+
+### 8. 插件完整性清单（3/3 通过）
+
+`plugins/manifest.sha256` 存在时强制校验；`build.py --release` 会自动生成。
+
+```
+未登记就放进 plugins/  →  [ERROR] [plugin_apitest.dll] 未在 plugins/manifest.sha256 中列出（完整性校验拒绝加载）
+                          插件目录共 6 个 DLL：成功 5，失败 1    exit=4
+改坏已登记插件 1 字节  →  [ERROR] [hotkey_ext.dll] SHA-256 与清单不符
+                          （期望 79295e91adde359e…，实测 da99d1fab0453f5d…）  exit=4
+重新生成清单后         →  插件目录共 5 个 DLL：成功 5，失败 0    exit=0
+```
+
+### 9. 发布构建 `build.py --release`
+
+```
+[OK] 已删除 build/ 与 dist/          ← 先干净重建（否则会继承上一轮的残留）
+[OK] 已生成 plugins/manifest.sha256（5 个插件）
+[OK] 已生成 run.bat 与 selftest.bat（纯 ASCII，CRLF）
+[release] 可发布文件 17 个，合计 127.0 MB
+```
+
+对比：不带 `--release` 的 `dist/` 会累积到 **306 MB**（含 `logs/`、`selftest_out*/`、
+`test_assets/`），且可能残留上一轮手工放进去的 DLL。实测 `.bat` 产物为
+**0 个非 ASCII 字节、CRLF 行尾**（`cmd.exe` 按 GBK 解析 .bat，混入中文会乱码/截断）。
 
 ---
 
@@ -330,18 +398,37 @@ pluginplayer/
 
 - **测试仍然很薄**：只有 2 个冒烟程序 + 1 个插件 API 回归插件，**没有单元测试框架**，
   也没有 CI。`build.py --smoke` / `--apitest` 是最小入口，不是完整测试网。
+- **依赖组件的 CVE**：**FFmpeg 9.0.1 有多个已公开 CVE**（`CVE-2025-9951` jpeg2000 堆溢出、
+  `CVE-2026-12706` RASC use-after-free、`CVE-2026-65706` vf_swaprect 越界写、
+  `CVE-2026-58049` 等），多条与"用构造的媒体文件触发"直接相关 —— 这是当前**最大的
+  残余风险**。**SDL3 3.4.16 未发现已知 CVE**（Ubuntu MIR 审查：osv-scanner 0 漏洞）。
+  缓解办法：`tools/fetch_deps.py --refresh` 重新抓取上游最新构建（gyan.dev 的
+  `ffmpeg-release-full-shared.7z` 是滚动构建，通常已含修复），抓完把新哈希写进
+  `DEPS_SHA256`。本项目无法核实那份构建具体对应哪个 commit。
 - **RPC 延迟受主循环帧期约束**：请求在主线程串行执行，60fps 下 p50 ≈ 16.6 ms。
   如果将来需要低延迟控制，得改成"主线程只做状态快照、慢操作异步化"。
-- **插件无签名/哈希校验**：`plugins/*.dll` 里放什么就执行什么；加载也未使用
-  `LOAD_LIBRARY_SEARCH_*` 加固标志（插件自身的依赖仍按默认搜索顺序解析）。
-- **依赖组件的 CVE 未扫描**：随包的 FFmpeg 9.0.1 / SDL3 3.4.16 没有做过漏洞比对。
-  不可信媒体文件的解码面是目前最大的残余风险。
+- **插件完整性清单是可选的**：只有 `plugins/manifest.sha256` **存在时**才校验。
+  发布时应当用 `--write-plugin-manifest` 生成并纳入版本控制；**新增/替换插件后必须
+  同步更新清单，否则该插件会被拒绝加载**。清单只能发现"文件被改过"，不能证明来源。
+  加载仍未使用 `LOAD_LIBRARY_SEARCH_*`（DLL 搜索路径已通过 `SetDefaultDllDirectories`
+  把工作目录排除，但插件自身的依赖仍走默认搜索顺序）。
+- **ABI 演进规则**：`PP_MediaInfo` / `PP_PlaybackStats` / `PP_EventCtx` / `PP_Plugin`
+  没有 `struct_size` 字段，靠 `abi_version` **严格相等**兜底 —— 因此对它们做任何字段
+  改动都必须递增 `PP_ABI_VERSION` 并重编全部插件。完整规则与"将来要做部分兼容时的
+  正确做法"已写进 `src/sdk/player_plugin.h` 顶部。
+- **控制通道会返回完整本地路径**（`player.info` / `/api/state`）：这是**刻意保留**的 ——
+  JS 插件的断点续播需要用它做 key，而且只有**已认证**连接才拿得到。
+- **JSON 解析仍是自实现**：已从"子串搜索"改为严格词法扫描（只认顶层键、正确处理转义、
+  拒绝重复键与超深嵌套），但不构造 DOM，数字仍走 `double`（超大整数会丢精度）。
+- **解码错误策略**：`av_read_frame` 连续失败 100 次（约 2 秒）即判定读完并收尾，
+  避免损坏文件"永远读不出东西也不结束"。`avcodec_send_packet` 的 EAGAIN 已改为
+  "先抽帧再重发同一个包"（旧实现直接丢包）。
 - **`openMedia` 没有 `interrupt_callback`**：打开损坏/超大/网络流输入时可能阻塞较久
   （控制通道会因为主线程被占而暂时不可用，10 秒后返回"主线程繁忙"）。
-- **`config/pluginplayer.ini` 的键按槽位号命名**（`plugin.<槽位>.<键>`），而槽位号是
-  DLL 名字母序 —— **增删插件会让既有配置整体错位**。目前用 `--write-dir` 等命令行
-  参数绕开；彻底修法是改成按插件名索引。
 - **网页控制页默认关闭**：想用必须显式开启（`PP_WEB_REMOTE=1`）。这是刻意的，
   因为它能驱动任意插件命令。
-- 控制通道加认证后，**所有**客户端都必须带令牌（`tools/rpc_client.py` 与
-  `host-js` 已内置；自己写的脚本要看 `control.h` 里的协议说明）。
+- **控制通道的所有客户端都必须带令牌**（`tools/rpc_client.py` 与 `host-js` 已内置；
+  自己写的脚本见 `control.h` 的协议说明）。
+- **升级旧配置**：从 `plugin.<槽位号>.<键>` 迁到 `plugin.<插件名>.<键>` 是**首次访问时
+  惰性迁移**的，旧键会保留在 ini 里不删（不做破坏性清理）。旧键的归属无法可靠推断
+  —— 槽位号取决于当时的插件集合 —— 所以迁移只是"尽力而为"，请人工核对一次。
