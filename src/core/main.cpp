@@ -43,6 +43,7 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <shellapi.h>   /* CommandLineToArgvW（WIN32_LEAN_AND_MEAN 下不被 windows.h 带入） */
 #endif
 
 using namespace pp;
@@ -121,12 +122,40 @@ static void printHelp() {
 }
 
 int main(int argc, char** argv) {
+    /* UTF-8 参数表：Windows 下用 Unicode 命令行重建（见下），其他平台保持原样。 */
+    std::vector<std::string> utf8Args;
+    std::vector<char*> utf8Argv;
 #ifdef _WIN32
     /* 控制台输出统一按 UTF-8 解读：源码与编译器的执行字符集都是 UTF-8，而 Windows
      * 控制台默认是 GBK(936) —— 双击 .bat 启动时中文会整片乱码（"搜索" 显示成
      * "鎼滅储"，用户实测报过）。stdout 重定向到管道/文件时该调用不影响字节流，
      * 捕获方仍按 UTF-8 解码；无控制台（GUI 方式启动）时它只是无害地返回 FALSE。 */
     SetConsoleOutputCP(CP_UTF8);
+
+    /* 参数编码：main 的 argv 由 CRT 从 ANSI(本机 GBK) 命令行转换而来，中文路径到这里
+     * 就已经不是 UTF-8 字节；而 FFmpeg 与文件系统接口都期望 UTF-8 —— 拖入/传入含中文
+     * 的媒体会直接 "avformat_open_input 失败 (Invalid argument)"（用户实测：
+     * 願廣西平安.mp4）。用 Unicode 命令行重取参数并转成 UTF-8；argv 之后的所有解析
+     * 逻辑保持原样。容器声明在 main 作用域内，保证 argv 指向的内存在整个 main 期间有效。 */
+    int wideArgc = 0;
+    wchar_t** wideArgv = CommandLineToArgvW(GetCommandLineW(), &wideArgc);
+    if (wideArgv != nullptr) {
+        utf8Args.reserve(static_cast<size_t>(wideArgc));
+        for (int i = 0; i < wideArgc; ++i) {
+            int need = WideCharToMultiByte(CP_UTF8, 0, wideArgv[i], -1, nullptr, 0, nullptr, nullptr);
+            std::string text;
+            if (need > 1) {
+                text.resize(static_cast<size_t>(need - 1));
+                WideCharToMultiByte(CP_UTF8, 0, wideArgv[i], -1, &text[0], need, nullptr, nullptr);
+            }
+            utf8Args.push_back(std::move(text));
+        }
+        LocalFree(wideArgv);
+        utf8Argv.reserve(utf8Args.size());
+        for (std::string& text : utf8Args) utf8Argv.push_back(&text[0]);
+        argc = wideArgc;
+        argv = utf8Argv.data();
+    }
 #endif
     std::string media;
     std::string outDir = "selftest_out";

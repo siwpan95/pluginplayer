@@ -703,18 +703,28 @@ OK                                                          ← tests/python/（
 C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个模块），
 所以"还没下依赖"的机器和 Linux 容器都能跑 —— 这是 CI 能有意义的前提。
 
-### 13. 启动器定位与中文显示（2026-09-12）
+### 13. 启动器定位与中文处理（2026-09-12）
 
 - `start-dsh.bat` 是**本项目启动器**：双击打开播放器窗口，媒体文件拖上去即播；它转发
   `run.bat`，启动与错误处理逻辑只保留一份（由 `build.py:make_launcher()` 生成）。
 - 控制台中文曾整片乱码（"搜索"显示成"鎼滅储"）：播放器输出是 UTF-8（源码与编译器的执行
   字符集都是 UTF-8），而 Windows 控制台默认按 GBK(936) 解读。现在程序入口调用
   `SetConsoleOutputCP(CP_UTF8)`，启动器里再加 `chcp 65001` —— 两层保证。
+- **含中文的媒体路径**曾打不开（`avformat_open_input 失败 ... (Invalid argument)`）：
+  Windows 的 `main(argv)` 由 CRT 从 ANSI(本机 GBK) 命令行转换而来，中文路径进到程序里
+  已经不是 UTF-8 字节，而 FFmpeg 的接口期望 UTF-8。现在程序入口用
+  `CommandLineToArgvW(GetCommandLineW())` 重取 Unicode 参数、转 UTF-8 后重建 `argv`。
 
 ```bat
 chcp 936                            :: 先把控制台钉到 GBK（复现条件）
 start-dsh.bat --list-plugins        :: 启动播放器
 chcp                                :: → Active code page: 65001（修复前此处仍是 936）
+```
+
+```text
+> pluginplayer.exe --selftest --frames 30 --out selftest_out "G:\...\願廣西平安.mp4"
+修复前：rc=2   avformat_open_input 失败: ... (Invalid argument)
+修复后：rc=0   [PASS] open_media — 480x852 29.97 fps dur=78.46 s codec=h264/aac
 ```
 
 ---
