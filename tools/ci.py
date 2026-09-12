@@ -196,6 +196,15 @@ def stage_selftest():
     return rc == 0, "\n".join(keep[-14:]) or tail(out)
 
 
+def stage_color():
+    """色彩还原回归：真解一帧、读像素，比对期望 RGB。"""
+    rc, out = run_cmd([sys.executable, "-X", "utf8",
+                       os.path.join(ROOT, "tests", "color_check.py")])
+    keep = [l for l in out.splitlines()
+            if l.startswith(("[PASS]", "[FAIL]", "[SKIP]", "====")) or l.startswith("        ")]
+    return rc == 0, "\n".join(keep[-25:]) or tail(out)
+
+
 def stage_cli():
     rc, out = run_cmd([sys.executable, "-X", "utf8",
                        os.path.join(ROOT, "tests", "cli_check.py")],
@@ -224,6 +233,9 @@ STAGES = [
      lambda: None if (on_windows() and have_vendor()) else "需要 Windows + vendor/", stage_build),
     ("selftest", "全链路自检（--selftest）", False,
      lambda: None if (on_windows() and have_dist()) else "需要 Windows + 已构建的 dist/", stage_selftest),
+    ("color", "色彩还原回归（tests/color_check.py）", False,
+     lambda: None if (on_windows() and have_vendor() and have_dist()) else
+     "需要 Windows + vendor/（随包 ffmpeg）+ 已构建的 dist/", stage_color),
     ("cli", "CLI 回归（tests/cli_check.py）", False,
      lambda: None if (on_windows() and have_dist()) else "需要 Windows + 已构建的 dist/", stage_cli),
     ("release", "发布构建（--release）", False,

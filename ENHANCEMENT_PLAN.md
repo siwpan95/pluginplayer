@@ -16,7 +16,7 @@
 | 1 | **自检的"可视证据图" `render_output.bmp` 里根本没有视频画面** —— 86.62% 的像素恰好等于窗口清屏色 `RGB(16,16,20)`，纯黑占 0.00%，非背景部分只有 OSD。也就是说这张证据图从启用以来就没有证明过"画面出得来" | ~~已实测确认~~ → **已修复（B1，2026-09-12）**，同一指标 86.60% → 0.39% | 像素直方图（§1.3）+ `app.cpp:352` 与 `app.cpp:700` 的交互；修复记录见 §4 P0-1 |
 | 2 | OSD 用 SDL 调试点阵字体 + `sanitize()` 把非 ASCII 全部降级成 `?`，**中文界面信息 100% 不可读** | **已实测确认** | 抓屏截图（§1.4）+ `osd.cpp:44-66` + `player_plugin.h:274` |
 | 3 | OSD 默认**压在画面上**：16:9 窗口播 16:9 素材时没有黑边可避让，而两个 OSD 面板正好盖住左上角（素材水印所在处） | **已实测确认** | §1.4 截图与几何计算（§2.5） |
-| 4 | 渲染/解码链路**没有色彩管理、没有硬件解码**，缩放只剩 SDL 的双线性采样 | **已确认（读码）** | `player.cpp:553-578`、全仓无 `AVHWDeviceType` |
+| 4 | 渲染/解码链路**没有色彩管理**（已修，B3）、**没有硬件解码**（待 P0-4）、缩放只剩 SDL 的双线性采样（待 P2-1） | 色彩：**已修复（B3）**；硬解：待做 | `player.cpp` 色彩段（原 553-578）；全仓无 `AVHWDeviceType` |
 | 5 | "黑屏无画面"：**已复现并修复**。真因不是时序竞争，而是 `Player::open()` 漏复位 `demuxFinished_`/`drainSent_` —— 同一进程里换片时 demux 线程一个包都不读，`finished()` 当场为真把主时钟冻在 0 ⇒ **必然永久黑屏**（控制通道 `player.open`、插件 `open_media` 都会命中） | **已修复（B2，2026-09-12）**；曾用注释掉两行复位复现 | 修复记录与证据见 §4 P0-2；回归用例 `--selftest` 的 `reopen_media` |
 | 6 | 依赖侧**已经具备**升级条件：随包 SDL3 3.4.16 支持 NV12 纹理、YCbCr 矩阵、D3D11 外部设备复用；FFmpeg 9.0.1 头文件带 `BindFlags`。零拷贝硬解路线可行 | **已核验** | `vendor/sdl3/include/SDL3/SDL_render.h:565,814`、`SDL_pixels.h:670,1066`、`vendor/ffmpeg/include/libavutil/hwcontext_d3d11va.h:103,166,174` |
 
@@ -174,7 +174,7 @@ while (!vframes_.empty() && vframes_.front()->pts <= master + 0.004) { pick = ..
 
 | 现象 | 代码依据 | 原因 |
 |---|---|---|
-| **发灰、黑位不对** | `player.cpp:553-564`：`sws_getContext(w,h,fmt, w,h,AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr,nullptr,nullptr)` | 完全不读 `AVFrame.colorspace / color_range / color_primaries / color_trc`。BT.601 与 BT.709 的矩阵、limited(16-235) 与 full(0-255) 的范围全靠 swscale 按分辨率"猜"。SD 素材按 709 解、或 full-range 按 limited 解，都会明显发灰/发白/对比度偏高 |
+| **发灰、黑位不对** | `player.cpp:553-564`：`sws_getContext(w,h,fmt, w,h,AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr,nullptr,nullptr)` | 完全不读 `AVFrame.colorspace / color_range`。**B3 实测修正**：范围这一半其实没错（swscale 对 `yuv420p`/`yuvj420p` 的默认处理是对的，16→0、235→255 实测通过）；真正错的是**矩阵**——素材标注被忽略，SD 素材会被按 BT.601 猜。修法与证据见 §4 P0-3 |
 | **发虚** | 同上的 `SWS_BILINEAR`，**且这里的 w/h 相同 ⇒ 这一步根本没缩放**；真正缩放发生在 `app.cpp:421` 的 `SDL_RenderTexture`，采样质量只有 SDL 的双线性（`SDL_render.h:1262`：默认 `SDL_SCALEMODE_LINEAR`） | 852→1278（1.5×）这种非整数上采样用双线性会明显糊；没有 lanczos/bicubic 可选 |
 | **色带** | 全仓无 deband/dither | 8bit 素材在平滑渐变处必然出色带，尤其低码率（本素材仅 471 kbps） |
 | **每帧 CPU 转换** | `player.cpp:578` `sws_scale` → RGBA；`app.cpp:383` `SDL_UpdateTexture` | RGBA 上传量是 NV12 的 2.67 倍；4K 下 CPU 转换 + 上传成为瓶颈 |
@@ -339,11 +339,49 @@ while (!vframes_.empty() && vframes_.front()->pts <= master + 0.004) { pick = ..
 | 超大窗口边界 | `--size 8192x8192 --selftest` → 11/11 PASS，抓屏按像素上限跳过落盘、像素取证照常 |
 | 门禁与测试 | `verify.py` 18/18；`build.py --unit` 83/83；`--smoke` 两项 PASS；Python 108 OK |
 
-#### P0-3 色彩管理（治"发灰"）
-- **改**：`player.cpp:553-564` 读取 `fr->colorspace / color_range / color_primaries / color_trc`，按 `SWS_CS_ITU709 / SWS_CS_ITU601 / SWS_CS_BT2020` 与 `srcRange` 正确建上下文。
-- **坑（务必注意）**：FFmpeg-devel 明确记录过 —— **range 参数必须在 `sws_init_context` 之前设定**，"只通过 `sws_setColorspaceDetails` 传是不够的"（级联路径上无效）。因此正确姿势是 `sws_alloc_set_opts()` → 设 `srcRange`/`dstRange` → `sws_setColorspaceDetails()` → `sws_init_context()`，而不是像现在这样一次性 `sws_getContext()`。这一点要写进注释。
-- **更优做法**：既然要转 NV12 路线（P0-4），把 YCbCr→RGB 矩阵交给 **SDL3 的 GPU 着色器**（`SDL_SetTextureColorSpace` + `SDL_COLORSPACE_BT709_LIMITED` 等，已确认随包可用），内核只负责"把正确的 colorspace 告诉 SDL"。这样矩阵与范围都不再经过 swscale 的猜测。
-- **验收**：用 `testsrc`/`smptebars` 生成 limited 与 full range 两份参考素材，断言转换后黑位/白位落在预期窗口内（可用 `read_*` 风格的 Python 单测读 PNG 像素）；并提供**抓屏前后对比图**（依赖 P0-1）。
+#### P0-3 色彩管理（治"发灰"）—— **已完成（2026-09-12，B3）**
+
+**先纠正规划里的一个错判。** 初版把"发灰"归因于**电平范围没处理**。实测推翻了它：
+
+| 素材（YUV 值已知） | 期望 | 修复前实测 | 结论 |
+|---|---|---|---|
+| `yuv420p` 有限范围 Y=16 / 235，未标注 | (0,0,0) / (255,255,255) | **(0,0,0) / (255,255,255)** | **本来就对** |
+| `yuvj420p` 全范围 Y=0 / 255，标 `pc` | (0,0,0) / (255,255,255) | **(0,0,0) / (255,255,255)** | **本来就对** |
+
+swscale 对 `yuv420p`(有限) 与 `yuvj420p`(全范围) 的默认处理是对的，所以"范围"这条不需要动。
+**真正的缺陷是：素材标注的色彩矩阵被完全忽略** —— 内核从不读 `AVFrame.colorspace`，
+而 `sws_getContext()` 不接受色彩信息，于是 swscale 只能按分辨率猜（SD → BT.601）。
+
+**做了什么**
+
+- 新增可移植纯函数 `chooseYuvColor(avColorSpace, avColorRange, w, h)`（`util.h/.cpp`）：
+  帧标注优先；未标注时用 **FFmpeg `vf_scale` 的 auto 规则**（> 576 行 BT.709，否则 BT.601）；
+  范围未标注取有限范围。返回值即 `SWS_CS_*`，可直接喂 `sws_getCoefficients()`。
+- `player.cpp` 建好 swscale 上下文后调 `sws_setColorspaceDetails()` 喂入
+  `inv_table` + `srcRange`（**两者必须同时给**，只给 range 在级联路径上无效 —— 这条坑
+  与规划里的提示一致，实测需要）。矩阵与范围一并纳入上下文重建判据。
+- 取值优先级链补了第 ② 层：**帧 → 容器（`codecpar->color_space`）**。查 FFmpeg 源码确认
+  h264 解码器会用 SPS VUI 覆盖 `avctx` —— `colorspace` 仅当
+  `colour_description_present_flag` 存在时覆盖，而 `color_range` 只要
+  `video_signal_type_present_flag` 存在就覆盖（`libavcodec/h264_slice.c:1119`）。
+- **没有**改用 FFmpeg 9 推荐的帧式 API（`sws_scale_frame`，从帧取色彩属性、
+  `sws_init_context` 已 deprecated）：那条路要连帧缓冲所有权一起改，留给 P0-4 的
+  NV12/GPU 化重写一并做，避免同一段代码改两遍。已写进 `docs/ARCHITECTURE.md` §3b。
+
+**验收证据（全部实跑）**
+
+| 项 | 结果 |
+|---|---|
+| `tests/color_check.py`（新增的永久回归层） | **5/5 通过**；含"纯元数据 A/B" |
+| 纯元数据 A/B（码流逐字节相同，只差容器标注） | 修复后输出差 **20** 级；修复前差 **0**（= 标注被完全忽略） |
+| 标 BT.709 的 SD 素材 | 修复前 (201,8,30)（= BT.601 结果）→ 修复后 (217,28,28)（≈ 期望 219,30,30） |
+| 这项检查能判红 | 去掉 `sws_setColorspaceDetails` 后 → **3/5，2 项 FAIL**（A/B 差 0） |
+| 单元测试 | `tests/unit/test_color.cpp` 6 项 + 原有 = **89/89** |
+| CI 接入 | `tools/ci.py` 新增 `color` 阶段（前提：Windows + vendor/ + dist/） |
+
+**未做（如实登记）**：`color_primaries` / `color_trc` 内核完全不读 → HDR / 广色域素材会被
+按 SDR 处理（过曝或发灰）。那属于 P2-3 的色调映射范围，且需要先有 GPU 管线；已写进
+README「已知限制」。
 
 #### P0-4 硬件解码 + NV12/零拷贝 + 上传路径
 - **改**：
@@ -449,7 +487,7 @@ while (!vframes_.empty() && vframes_.front()->pts <= master + 0.004) { pick = ..
 |---|---|---|
 | **B1** | P0-1（证据链修复 + 加严断言）→ 立刻给出"修复前/修复后"对比图 | `verify.py` + `verify.py --selfcheck` + 单测 |
 | **B2** | ~~P0-2 复现 → 修复 → 固化回归用例~~ **已完成 2026-09-12** | `verify.py` 18/18 + `--selftest` 11/11 + 控制通道两路取证 |
-| **B3** | P0-3 色彩管理（先做 NV12 + SDL colorspace 路线，与 B4 合并更省事） | 同上 + 像素单测 |
+| **B3** | ~~P0-3 色彩管理~~ **已完成 2026-09-12**（实测后收敛为"矩阵 + 容器标注"；范围本来就对） | `tests/color_check.py` 5/5 + 单测 89/89 + `verify.py` 18/18 |
 | **B4** | P0-4 硬解 + 零拷贝（含 SDL3 NV12 前置验证） | 同上 + 4K 实测数据 |
 | **B5** | ABI v3 一次性落地（把 P1-1/P1-2/P1-4 需要的新能力一起加，避免多次重编全部插件） | `verify.py --selfcheck` + `--apitest` |
 | **B6** | P1-1 真字体 OSD / P1-2 鼠标通道 / P1-4 多轨与设备 | 同上 |

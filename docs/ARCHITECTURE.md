@@ -83,6 +83,37 @@ SDL 音频流…）只被一个线程触碰。
 - **暂停/变速**：暂停时墙钟冻结、音频回调直接返回（自然静音）；
   变速用 `SDL_SetAudioStreamFrequencyRatio(stream, speed)` 做重采样，视频看主时钟。
 
+## 3b. 色彩还原（矩阵与电平范围）
+
+YUV→RGB 必须用**素材自己标注的那套矩阵**，不能靠猜。取值优先级链：
+
+```
+fr->colorspace / fr->color_range                 ① 逐帧标注（H.265/AV1 会逐帧给）
+   ↓ 缺失时
+stream->codecpar->color_space / color_range      ② 容器/流级标注（mp4 colr、mkv Colour）
+   ↓ 仍缺失
+按分辨率推测：> 576 行走 BT.709，否则 BT.601      ③ 与 FFmpeg vf_scale 的 auto 规则一致
+```
+
+- 选择逻辑是**可移植纯函数** `chooseYuvColor()`（`util.h`）。它的返回值直接就是
+  libswscale 的 `SWS_CS_*` 取值，喂给 `sws_getCoefficients()` 即可。纯逻辑放在 util
+  里才能在 Linux CI 上跑单测（`tests/unit/test_color.cpp`）。
+- **为什么需要 ②**：h264 解码器会用 SPS VUI 覆盖 `avctx->colorspace` / `color_range`
+  （`libavcodec/h264_slice.c:1119`：`colorspace` 仅在 `colour_description_present_flag`
+  存在时覆盖，`color_range` 只要 `video_signal_type_present_flag` 存在就覆盖）。
+  码流没声明时容器标注是唯一线索，而 `codecpar` 归解复用器所有、解码器覆盖不到。
+- **为什么用 `sws_setColorspaceDetails()` 而不是帧式 API**：`sws_getContext()` 一次建好
+  上下文且不接受色彩信息，只能在建好后补设 —— `inv_table` 与 `srcRange` **必须同时给**，
+  只给 range 在级联路径上无效。FFmpeg 9 更推荐 `sws_scale_frame()`（直接取帧上的色彩
+  属性，`sws_init_context` 已标 deprecated），但那条路要连帧缓冲所有权一起改，
+  留给 P0-4 的 NV12/GPU 化重写一并做，避免同一段代码改两遍。
+- 矩阵与范围都进 **sws 上下文的重建判据**：素材中途换标注（合流、拼接）时必须重建，
+  否则会拿旧矩阵还原新画面。
+- **未做**：色域（`color_primaries`）与传输函数（`color_trc`）不参与运算，HDR 素材会被
+  当 SDR 处理。见 README「已知限制」。
+- 回归：`tests/color_check.py`（现造参考素材 + 读像素比对期望 + 同码流不同标注的 A/B）、
+  `tests/unit/test_color.cpp`（纯逻辑）。
+
 ## 4. 精确 seek
 
 `AVSEEK_FLAG_BACKWARD` 只能回到**前一个关键帧**。对关键帧稀疏的文件（例如 x264 默认

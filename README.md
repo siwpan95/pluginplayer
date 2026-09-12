@@ -149,7 +149,7 @@ F:\Python314\python.exe tools\ci.py           :: 同上，直接调编排脚本�
 | `gates` 机械门禁（`tools/verify.py`，18 条） | 跨平台 | 无 |
 | `py-unit` Python 单元测试（108 项） | 跨平台 | 标准库 |
 | `cpp-unit` C++ 单元测试（83 项） | 跨平台 | g++ / MinGW |
-| `smoke` 冒烟、`build` 构建、`selftest` 自检、`cli` CLI 回归、`release` 发布构建 | **仅 Windows** | vendor/ 或 dist/ |
+| `smoke` 冒烟、`build` 构建、`selftest` 自检、`color` 色彩还原、`cli` CLI 回归、`release` 发布构建 | **仅 Windows** | vendor/ 或 dist/ |
 
 ### 为什么 CI 只有一半是跨平台的
 
@@ -357,6 +357,7 @@ pluginplayer/
 │     smoke_audio.cpp                  音频子系统冒烟（判定环境问题还是代码问题）
 │     plugin_apitest/plugin.cpp        插件 API 回归测试插件（插件用，不随发布物分发）
 │     cli_check.py                     命令行接口回归（垫片契约 + 退出码 + 真跑控制通道）
+│     color_check.py                   色彩还原回归（现造参考素材 + 读像素比对期望 RGB）
 │     unit/                            ★ C++ 单元测试（83 项，零依赖的极简 harness）
 │     python/                          ★ Python 单元测试（108 项，标准库 unittest）
 ├─ tools/fetch_deps.py                 依赖准备；rpc_client.py 控制通道测试客户端（带令牌）
@@ -803,6 +804,59 @@ chcp                                :: → Active code page: 65001（修复前�
 （852x480 到 794 MB、含纯视频 mp4 与纯音频 m4a）**都没有复现出首开黑屏**，
 所以**没有做这处改动** —— 没有复现证据就不改行为。
 
+### 15. 色彩还原回归 `tests/color_check.py` —— 5/5 通过（2026-09-12）
+
+**为什么单开一层**：色彩错了**不会崩、不会报错、不会掉帧**，只会让画面偏色或发灰 ——
+`--selftest`、CLI 回归、单元测试**都看不见**。所以补一层：真解一帧、读像素，
+跟脚本里独立算出的期望 RGB 比对。
+
+**修的是什么**：内核从不读 `AVFrame.colorspace` / `color_range`，而 `sws_getContext()`
+一次性建上下文、**不接受任何色彩信息**，于是 swscale 只能按自己的默认值猜矩阵。
+真实文件的矩阵是写在码流/容器里的，忽略它就等于用错矩阵还原 —— SD 尺寸素材尤其容易踩到
+（分辨率启发式猜 BT.601，而素材可能明明标着 BT.709）。
+
+**改动**：
+- 新增可移植纯函数 `chooseYuvColor()`（`util.h/.cpp`）：**帧标注优先**；未标注时按 FFmpeg
+  `vf_scale` 的 auto 规则（> 576 行用 BT.709，否则 BT.601）；范围未标注取有限范围。
+  纯逻辑放在 util 里，是为了能在 Linux CI 上跑单测（`tests/unit/test_color.cpp`，6 项）。
+- `player.cpp` 在建好 swscale 上下文后调 `sws_setColorspaceDetails()`，把**矩阵系数 +
+  电平范围**喂进去（`sws_getContext()` 不给这个机会），并把这两项纳入上下文重建判据
+  （素材中途换标注时必须重建，否则会拿旧矩阵还原新画面）。
+- 取值优先级链：**帧 → 容器**（`codecpar->color_space`）。后者是保险层 ——
+  h264 解码器会用 SPS VUI 覆盖 `avctx`：`colorspace` 仅在
+  `colour_description_present_flag` 存在时覆盖，而 `color_range` 只要
+  `video_signal_type_present_flag` 存在就覆盖（`libavcodec/h264_slice.c:1119`）。
+
+**关键一招是"纯元数据 A/B"**：两个素材的码流**逐字节相同**，只用 `-c copy` 给其中一个
+加上容器标注。播放器若忽略标注，两者输出必然一致 —— 所以这项检查不只验"数值对不对"，
+还验"标注确实被读进去了"：
+
+```
+[PASS] 中性 有限范围→RGB                   左 (0,0,0) 右 (255,255,255)   ← 16→0 / 235→255
+[PASS] 中性 全范围→RGB                     左 (0,0,0) 右 (255,255,255)
+[PASS] 饱和色 未标注→按分辨率猜 BT.601      期望 (202,10,32) 实测 (201,8,30)
+[PASS] 饱和色 容器标 BT.709→必须用 BT.709   期望 (219,30,30) 实测 (217,28,28)
+[PASS] 纯元数据 A/B：同码流不同标注 → 输出确有差异（最大通道差 20）
+==== 色彩还原: 5/5 项通过，跳过 0 项，失败 0 项 ====
+```
+
+**这项检查确实会红**（刻意复现过）：把 `sws_setColorspaceDetails()` 那一步去掉
+（即修复前的行为），标 BT.709 的素材回落成 BT.601 的结果，A/B 两项直接失败：
+
+```
+[FAIL] 饱和色 容器标 BT.709→必须用 BT.709   期望 (219,30,30) 实测 (201,8,30)
+[FAIL] 纯元数据 A/B：同码流不同标注却给出几乎一样的结果（最大通道差 0）
+==== 色彩还原: 3/5 项通过，跳过 0 项，失败 2 项 ====
+```
+
+**一处如实纠正**：规划里我以为"发灰"来自**电平范围没处理**。实测推翻了这个判断 ——
+swscale 对 `yuv420p`（有限）/ `yuvj420p`（全范围）的默认处理本来就是对的
+（实测 16→0、235→255、0→0、255→255 全对）。**真正的缺陷是信号标注的矩阵被忽略。**
+所以本轮的修复范围按实测结果收敛到"矩阵 + 容器标注"，没有去改本来就对的范围处理。
+
+**仍未处理（登记在「已知限制」）**：`color_primaries` / `color_trc` 内核完全不读 ——
+HDR / 广色域素材的传输函数与色域映射属于 P2-3，不在本轮范围。
+
 ---
 
 ## 与原 playerdemo 的差异
@@ -828,6 +882,10 @@ chcp                                :: → Active code page: 65001（修复前�
 - 只实现 Windows（Winsock2 控制通道、MinGW 工具链）。内核里除 `util.cpp` 的路径/目录部分外基本可移植。
 - 没有做硬件加速解码（`d3d11va`/`dxva2`），4K 高码率可能吃 CPU。
 - 不解析字幕（`.srt`/`.ass`），只画 OSD；字幕可作为下一个插件接入（`PP_TOPIC_VIDEO_FRAME` + OSD 已够用）。
+- **色彩只处理矩阵与电平范围，不处理色域与传输函数**：`AVFrame.color_primaries` /
+  `color_trc` 内核**完全不读**（只读 `colorspace` / `color_range`，见验证结果第 15 节）。
+  因此 HDR（PQ/HLG）与广色域（BT.2020 原始色域）素材会被按 SDR 处理 —— 表现为过曝或发灰。
+  正确做法是 libplacebo 级的色调映射，属于 P2-3，不在本轮范围。
 - 无播放列表 UI；用控制通道或命令扩展。
 - 单文件播放；跨文件续播由 `auto-resume` 插件负责但不做自动切集。
 - JS 侧 `npm install` 需要网络（`cordis` 与 `@cordisjs/plugin-loader` 从 npm 拉取）。

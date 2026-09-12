@@ -91,6 +91,41 @@ bool sha256FileHex(const std::string& path, std::string* outHexLower);
 bool writePngRGBA(const std::string& path, const uint8_t* rgba, int w, int h, int pitch);
 bool writePngGray8(const std::string& path, const uint8_t* gray, int w, int h, int pitch);
 
+/* ---- YUV → RGB 的矩阵与电平范围选择 ----
+ *
+ * 为什么需要它：`sws_getContext()` 一次性建好上下文、**不接受任何色彩信息**，
+ * 于是 swscale 只能按自己的默认值猜矩阵。真实文件的色彩矩阵是**写在码流里**的
+ * （`AVFrame.colorspace` / `AVFrame.color_range`），忽略它就等于用错的矩阵去还原：
+ * 典型症状是肤色/红色偏色、整体发闷。SD 尺寸的素材尤其容易踩到
+ * （分辨率启发式会猜 BT.601，而素材可能明确标着 BT.709）。
+ *
+ * 入参直接用 FFmpeg 的 `AVColorSpace` / `AVColorRange` 取值（本模块刻意不 include
+ * FFmpeg 头，以保持可移植、可单测）：
+ *
+ *   AVColorSpace : RGB=0  BT709=1  UNSPECIFIED=2  FCC=4  BT470BG=5
+ *                  SMPTE170M=6  SMPTE240M=7  YCGCO=8  BT2020_NCL=9  BT2020_CL=10
+ *   AVColorRange : UNSPECIFIED=0  MPEG(有限范围 16-235)=1  JPEG(全范围 0-255)=2
+ *
+ * 未标注（UNSPECIFIED）时用 **FFmpeg 自己 vf_scale 的 `auto` 规则**：
+ * 高度 > 576 行按 BT.709，否则按 BT.601 —— 而不是无脑用 SWS_CS_DEFAULT(601)。
+ * 范围未标注时取**有限范围**（与 swscale 自己的默认一致，也是绝大多数素材的情况）。 */
+enum YuvMatrix {
+    YUV_MATRIX_BT709     = 1,   /* 取值与 libswscale 的 SWS_CS_ITU709 一致 */
+    YUV_MATRIX_FCC       = 4,   /* == SWS_CS_FCC */
+    YUV_MATRIX_BT601     = 5,   /* == SWS_CS_ITU601 / SWS_CS_SMPTE170M */
+    YUV_MATRIX_SMPTE240M = 7,   /* == SWS_CS_SMPTE240M */
+    YUV_MATRIX_BT2020    = 9,   /* == SWS_CS_BT2020 */
+};
+
+struct YuvColorChoice {
+    /** enum YuvMatrix。取值与 SWS_CS_* 相同，可直接喂 sws_getCoefficients()。 */
+    int matrix;
+    /** 0 = 有限范围(16-235)，1 = 全范围(0-255)。对应 sws_setColorspaceDetails 的 srcRange。 */
+    int fullRange;
+};
+
+YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int height);
+
 /* ---- 抓屏取证：矩形内"恰好等于指定颜色"的像素占比 ----
  * 参数非法（空指针 / 尺寸非正 / pitch < w*4 / 矩形容不下任何像素）时返回 **-1.0**，
  * 调用方据此区分"占比为 0"与"压根没量到"；否则返回 0..1。

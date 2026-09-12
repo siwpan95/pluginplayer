@@ -64,6 +64,7 @@ UNIT_TEST_SOURCES = [
     "tests/unit/test_json.cpp",
     "tests/unit/test_hash_png.cpp",
     "tests/unit/test_capture.cpp",
+    "tests/unit/test_color.cpp",
     "tests/unit/test_eventbus.cpp",
     "tests/unit/test_registry.cpp",
     "tests/unit/test_config.cpp",

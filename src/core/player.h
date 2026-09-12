@@ -186,6 +186,10 @@ private:
     SwsContext*      sws_ = nullptr;
     SwrContext*      swr_ = nullptr;
     int              swsW_ = 0, swsH_ = 0, swsFmt_ = -1;
+    /* 当前 swscale 上下文所用的色彩矩阵与范围（enum YuvMatrix / 0|1）。
+     * 它们是**重建判据的一部分**：帧上的色彩标注变了就必须重建上下文，
+     * 否则会拿旧矩阵去还原新画面（合流、拼接、跨片段切轨时会发生）。 */
+    int              swsCs_ = -1, swsRange_ = -1;
     std::string      path_;
     bool             opened_ = false;
 

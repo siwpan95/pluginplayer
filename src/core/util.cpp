@@ -764,4 +764,33 @@ double rgbaColorRatioInRect(const uint8_t* rgba, int pitch, int w, int h,
     return (double)hit / ((double)rw * (double)rh);
 }
 
+/* ======================= YUV→RGB 色彩选择 ======================= */
+
+YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int height) {
+    (void)width;
+    YuvColorChoice r{};
+
+    switch (avColorSpace) {
+        case 1:  r.matrix = YUV_MATRIX_BT709;     break;   /* AVCOL_SPC_BT709 */
+        case 5:  r.matrix = YUV_MATRIX_BT601;     break;   /* AVCOL_SPC_BT470BG（PAL/SECAM） */
+        case 6:  r.matrix = YUV_MATRIX_BT601;     break;   /* AVCOL_SPC_SMPTE170M（NTSC） */
+        case 7:  r.matrix = YUV_MATRIX_SMPTE240M; break;
+        case 4:  r.matrix = YUV_MATRIX_FCC;       break;
+        case 9:  r.matrix = YUV_MATRIX_BT2020;    break;   /* AVCOL_SPC_BT2020_NCL */
+        case 10: r.matrix = YUV_MATRIX_BT2020;    break;   /* AVCOL_SPC_BT2020_CL */
+        default:
+            /* UNSPECIFIED / RGB / YCGCO / 未知：按分辨率走 FFmpeg 的 auto 规则。
+             * 用 > 576 而不是 >= 576：576p(SD) 属于 SD，720p 起才算 HD。 */
+            r.matrix = (height > 576) ? YUV_MATRIX_BT709 : YUV_MATRIX_BT601;
+            break;
+    }
+
+    switch (avColorRange) {
+        case 2:  r.fullRange = 1; break;   /* AVCOL_RANGE_JPEG：全范围 0-255 */
+        case 1:  r.fullRange = 0; break;   /* AVCOL_RANGE_MPEG：有限范围 16-235 */
+        default: r.fullRange = 0; break;   /* 未标注 → 有限范围（swscale 的默认口径） */
+    }
+    return r;
+}
+
 } // namespace pp

@@ -353,6 +353,7 @@ void Player::close() {
 
     swsW_ = swsH_ = 0;
     swsFmt_ = -1;
+    swsCs_ = swsRange_ = -1;
     vStream_ = aStream_ = -1;
     opened_ = false;
     eof_ = false;
@@ -568,17 +569,64 @@ void Player::videoDecodeLoop() {
                 int h = fr->height > 0 ? fr->height : srcH_;
                 if (w <= 0 || h <= 0) { av_frame_unref(fr); continue; }
 
-                if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != fr->format) {
+                /* 色彩矩阵与电平范围：必须按标注来，不能靠 swscale 猜。
+                 * 取值优先级链：
+                 *   ① fr->colorspace / fr->color_range —— 最具体（逐帧，H.265/AV1 会逐帧给）
+                 *   ② stream->codecpar->color_space / color_range —— 容器/流级标注
+                 * ② 是保险层：解复用器把容器标注（mp4 的 colr box、mkv 的 Colour）写进
+                 * codecpar，`avcodec_parameters_to_context()` 再带进解码器上下文，正常情况下
+                 * ① 就能拿到（本机用"容器标 bt709、码流无 VUI"的素材实测：日志显示来源=帧）。
+                 * 但这条链不是所有编解码器/容器都成立 —— 例如 h264 解码器会用 SPS VUI 覆盖
+                 * avctx：colorspace 仅当 colour_description_present_flag 存在时才覆盖
+                 * （见 libavcodec/h264_slice.c:1119），而 color_range 只要
+                 * video_signal_type_present_flag 存在就覆盖。所以码流若声明了范围、容器另有
+                 * 说法，以码流为准；反之码流什么都没说时，才回到容器这一层。
+                 * codecpar 归解复用器所有，解码器覆盖不到，是这类情况下唯一的可靠来源。 */
+                int csId = (int)fr->colorspace;
+                int rgId = (int)fr->color_range;
+                const char* csSrc = "帧";
+                if (csId == 2 /* AVCOL_SPC_UNSPECIFIED */ ||
+                    rgId == 0 /* AVCOL_RANGE_UNSPECIFIED */) {
+                    const AVCodecParameters* par = fmt_->streams[vStream_]->codecpar;
+                    if (csId == 2) {
+                        csId = (int)par->color_space;
+                        if (csId != 2) csSrc = "容器";
+                    }
+                    if (rgId == 0) rgId = (int)par->color_range;
+                }
+                if (csId == 2) csSrc = "按分辨率推测";
+                YuvColorChoice cc = chooseYuvColor(csId, rgId, w, h);
+
+                /* 这两项也进重建条件 —— 素材中途换色彩标注（合流/拼接）时要重建上下文。 */
+                if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != fr->format ||
+                    swsCs_ != cc.matrix || swsRange_ != cc.fullRange) {
                     if (sws_) sws_freeContext(sws_);
                     sws_ = sws_getContext(w, h, (AVPixelFormat)fr->format,
                                           w, h, AV_PIX_FMT_RGBA,
                                           SWS_BILINEAR, nullptr, nullptr, nullptr);
                     swsW_ = w; swsH_ = h; swsFmt_ = fr->format;
+                    swsCs_ = cc.matrix; swsRange_ = cc.fullRange;
                     if (!sws_) {
                         PP_ERROR("sws_getContext 失败 (fmt=%d)", fr->format);
                         av_frame_unref(fr);
                         continue;
                     }
+                    /* sws_getContext() 不接受色彩信息，只能在建好之后补上。
+                     * 参数依次是：输入系数表 / 输入范围 / 输出系数表 / 输出范围。
+                     * 输出是 RGBA，所以 dstRange 恒为 1（全范围）。
+                     * 注意：只传 srcRange、不传 inv_table 在级联路径上无效 —— 两者都要给。 */
+                    const int* coeffs = sws_getCoefficients(cc.matrix);
+                    int cr = sws_setColorspaceDetails(sws_, coeffs, cc.fullRange,
+                                                     coeffs, 1, 0, 1 << 16, 1 << 16);
+                    PP_INFO("色彩: 矩阵=%s 范围=%s（来源=%s，cs=%d range=%d，%dx%d）",
+                            cc.matrix == YUV_MATRIX_BT709 ? "BT.709" :
+                            cc.matrix == YUV_MATRIX_BT2020 ? "BT.2020" :
+                            cc.matrix == YUV_MATRIX_SMPTE240M ? "SMPTE240M" :
+                            cc.matrix == YUV_MATRIX_FCC ? "FCC" : "BT.601",
+                            cc.fullRange ? "全范围" : "有限范围",
+                            csSrc, csId, rgId, w, h);
+                    if (cr < 0)
+                        PP_WARN("sws_setColorspaceDetails 失败(%d)：将按 swscale 默认矩阵转换", cr);
                 }
 
                 auto vf = std::make_shared<VideoFrame>();
