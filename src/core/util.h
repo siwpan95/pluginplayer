@@ -126,15 +126,28 @@ struct YuvColorChoice {
 
 YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int height);
 
-/* 注：曾实现过 sdlColorspaceFor()（把上面的选择映射成 SDL_Colorspace，供 NV12 纹理
- * 在创建时告知矩阵/范围），随 NV12 纹理路线一起回退了 —— 那条路在本项目的插件形态下
- * 是净损失，见 ENHANCEMENT_PLAN 的 P0-4b'。SDL 的取值表记在规划文档里备查：
+/* ---- 同一套色彩选择到 SDL_Colorspace 的映射 ----
+ * 走 NV12 纹理时 YUV→RGB 由 GPU 做，矩阵/范围必须**在建纹理时**告诉 SDL：
+ * SDL 3.4.16 没有 SDL_SetTextureColorSpace，只有创建属性
+ * SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER（NV12 纹理的**默认值是
+ * SDL_COLORSPACE_JPEG**，即全范围 BT.601 —— 不显式设置就是错色）。
+ *
+ * 取值直接抄 SDL_pixels.h（本模块不 include SDL 头，以保持可移植、可单测）：
  *   BT601_LIMITED=0x211018c6  BT601_FULL=0x221018c6
  *   BT709_LIMITED=0x21100421  BT709_FULL=0x22100421
  *   BT2020_LIMITED=0x21102609 BT2020_FULL=0x22102609
- * 另注：SDL 3.4.16 **没有** SDL_SetTextureColorSpace，色彩空间只能在
- * SDL_CreateTextureWithProperties 时通过
- * SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER 给（NV12 的默认值是 SDL_COLORSPACE_JPEG）。 */
+ * SMPTE240M 与 FCC 在 SDL 里没有对应值 —— 退回 BT.601，并用 *fellBack 告知调用方
+ * 打日志，避免"悄悄用错矩阵"。 */
+enum SdlColorSpaceId {
+    PP_SDL_CS_BT601_LIMITED  = 0x211018c6,
+    PP_SDL_CS_BT601_FULL     = 0x221018c6,
+    PP_SDL_CS_BT709_LIMITED  = 0x21100421,
+    PP_SDL_CS_BT709_FULL     = 0x22100421,
+    PP_SDL_CS_BT2020_LIMITED = 0x21102609,
+    PP_SDL_CS_BT2020_FULL    = 0x22102609,
+};
+
+int sdlColorspaceFor(const YuvColorChoice& c, int* fellBack);
 
 /* ---- 抓屏取证：矩形内"恰好等于指定颜色"的像素占比 ----
  * 参数非法（空指针 / 尺寸非正 / pitch < w*4 / 矩形容不下任何像素）时返回 **-1.0**，

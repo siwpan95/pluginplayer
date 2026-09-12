@@ -793,4 +793,21 @@ YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int
     return r;
 }
 
+int sdlColorspaceFor(const YuvColorChoice& c, int* fellBack) {
+    if (fellBack) *fellBack = 0;
+    const int full = c.fullRange ? 1 : 0;
+    switch (c.matrix) {
+        case YUV_MATRIX_BT709:
+            return full ? PP_SDL_CS_BT709_FULL : PP_SDL_CS_BT709_LIMITED;
+        case YUV_MATRIX_BT2020:
+            return full ? PP_SDL_CS_BT2020_FULL : PP_SDL_CS_BT2020_LIMITED;
+        case YUV_MATRIX_BT601:
+            return full ? PP_SDL_CS_BT601_FULL : PP_SDL_CS_BT601_LIMITED;
+        default:
+            /* FCC / SMPTE240M：SDL 没有对应枚举，退回 BT.601 并让调用方告警。 */
+            if (fellBack) *fellBack = 1;
+            return full ? PP_SDL_CS_BT601_FULL : PP_SDL_CS_BT601_LIMITED;
+    }
+}
+
 } // namespace pp

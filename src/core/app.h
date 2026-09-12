@@ -64,6 +64,10 @@ private:
      *  可能已经被别人"看过"、但屏幕上一次都没画过）。调用方必须保证同一帧
      *  只 force 一次，否则帧处理链会被跑两遍。 */
     bool pumpAndUpload(bool force = false);
+    /** 构造给插件帧处理链的 RGBA 视图：**按需**把 NV12 物化成 RGBA。
+     *  返回 false 表示物化失败（这一帧不能给插件，调用方应照常显示并跳过帧链）。
+     *  必须与帧链在同一线程（主线程）调用。 */
+    bool makeFrameView(const std::shared_ptr<VideoFrame>& f, PP_FrameView* view);
     void renderFrame();
     void renderBuiltinOverlay();       /* 帮助/提示层（核心自带） */
     void stepAudioLead();
@@ -72,6 +76,10 @@ private:
     /* 音频 */
     bool openAudio();
     void closeAudio();
+    /** 预热结束就把被推迟的音频设备补启动。
+     *  主循环与自检循环都要调 —— 自检是直接调 player_.pumpFrame() 的，
+     *  少了这一步自检里音频设备永远不会启动，音频环也永远排不空。 */
+    void stepAudioPreroll();
     static void SDLCALL audioCallback(void* userdata, SDL_AudioStream* stream,
                                       int additional, int total);
 
@@ -84,9 +92,19 @@ private:
     SDL_Renderer*      ren_ = nullptr;
     SDL_Texture*       tex_ = nullptr;
     int                texW_ = 0, texH_ = 0;
+    /* 纹理的格式与色彩空间也进重建判据：NV12 纹理的矩阵/范围**只能在创建时**给
+     * （SDL 3.4.16 没有 SetTextureColorSpace），换标注就必须重建。 */
+    uint32_t           texFmt_ = 0;
+    int                texCs_ = -1;
+    bool               texCsFellBackWarned_ = false;
+    /* PP_NO_NV12=1：强制 RGBA 上传路径（同一二进制上的 A/B 基准开关，见 pumpAndUpload） */
+    bool               forceRgba_ = false;
     int                winW_ = 1280, winH_ = 720;
     bool               hidden_ = false;
     bool               audioEnabled_ = true;
+    /* 音频设备已打开但因"预热"而故意没启动（等第一帧视频上屏，见 Player::prerollPending）。
+     * 这类设备必须在主循环里补一次 SDL_ResumeAudioStreamDevice。 */
+    bool               audioAwaitPreroll_ = false;
     bool               quit_ = false;
     bool               fullscreen_ = false;
     bool               showHelp_ = false;

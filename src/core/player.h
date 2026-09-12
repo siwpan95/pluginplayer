@@ -38,19 +38,25 @@ struct SwrContext;
 
 namespace pp {
 
-/** 一帧已转换好的 RGBA8888 像素。
+/** 一帧已转换好的像素。
  *
- * 为什么保留 RGBA 而不是改成 NV12：插件帧处理链（`PP_FrameView`）的契约就是
- * "可写的 RGBA 像素"，而内置插件会在启动时注册帧处理器 —— 也就是说**常规路径上
- * 永远有链存在**。2026-09-12 曾试过"默认 NV12、有人要 RGBA 才物化"，
- * 实测在装了帧处理器的场景下会多出一次全帧转换（4K 掉帧从 11 涨到 78），
- * 所以回退了。要再走这条路，得先让插件按需挂帧处理器（不启用时不占链），
- * 详见 ENHANCEMENT_PLAN 的 P0-4b'。 */
+ * 解码线程产出 **NV12**（`nv12` + `nv12Pitch`）：渲染层用 NV12 纹理，YUV→RGB 交给 GPU，
+ * CPU 不再逐像素转换，上传量也只有 RGBA 的 3/8（4K 每帧 33 MB → 12.4 MB）。
+ *
+ * `rgba` 是**按需物化**的 —— 插件的帧处理链与 acquire_frame 需要可写 RGBA，
+ * 只有真的有人要时才由 Player::materializeRgba() 填上；`rgbaReady` 标记是否已填。 */
 struct VideoFrame {
-    std::vector<uint8_t> rgba;
+    std::vector<uint8_t> nv12;      /* Y 平面 pitch*h + UV 平面（交错），两块连续 */
+    int      nv12Pitch = 0;         /* Y 平面每行字节数（偶数对齐），UV 平面行距相同 */
+    std::vector<uint8_t> rgba;      /* 按需物化的 RGBA8888（给插件） */
+    bool     rgbaReady = false;
     int      w = 0;
     int      h = 0;
-    int      pitch = 0;
+    int      pitch = 0;             /* RGBA 行距；rgbaReady 之后才有效 */
+    /* 这一帧的色彩标注（chooseYuvColor 的结果）。渲染层据此在建 NV12 纹理时
+     * 把矩阵/范围告诉 SDL —— GPU 才知道该用哪套系数做 YUV→RGB。 */
+    int      colorMatrix = 0;
+    int      fullRange = 0;
     double   pts = 0.0;
     double   duration = 0.0;
     int64_t  index = 0;
@@ -147,6 +153,16 @@ public:
     /** 实际生效的硬件解码名（"d3d11va"），纯软解时返回空串。 */
     const char* hwdecName() const { return hwActive_ ? hwName_ : ""; }
 
+    /** 预热态：open() 之后、第一帧真正上屏之前为 true。
+     *
+     *  为什么需要它：解码器（尤其 D3D11VA 硬件解码）冷启动要 ~0.2 s 才吐得出第一帧，
+     *  而主时钟原本在 open() 里就开始走 —— 于是解出的头几帧一进队列就已经
+     *  "迟到"（pts 落后于主时钟），被 pumpFrame 整批弹掉算作丢帧。
+     *  实测：720p30 素材固定丢 6 帧，且**与素材长短无关**（3 s 丢 6 / 10 s 也丢 6），
+     *  与有无音轨也无关（6 / 6）—— 说明是固定启动成本，不是解码跟不上。
+     *  预热期间冻结主时钟，并让宿主推迟启动音频设备，播放开始时 A/V 一起从 0 起跑。 */
+    bool   prerollPending() const { return prerollPending_.load(); }
+
     void   fillMediaInfo(PP_MediaInfo* out) const;
     void   fillStats(PP_PlaybackStats* out);
 
@@ -158,6 +174,10 @@ public:
     std::shared_ptr<VideoFrame> currentFrame() const;
     std::shared_ptr<VideoFrame> copyCurrentFrame();
     void writeBackCurrentFrame(const std::shared_ptr<VideoFrame>& f);
+
+    /** 把 NV12 帧物化成 RGBA8888（供插件的帧处理链与 acquire_frame 使用）。
+     *  已物化则直接返回 true。**必须在主线程调用**（与帧链同一线程）。 */
+    bool materializeRgba(const std::shared_ptr<VideoFrame>& f);
 
     int  videoWidth() const { return srcW_; }
     int  videoHeight() const { return srcH_; }
@@ -208,6 +228,11 @@ private:
     AVCodecContext*  vCtx_ = nullptr;
     AVCodecContext*  aCtx_ = nullptr;
     SwsContext*      sws_ = nullptr;
+    /* NV12 → RGBA 的第二个转换上下文：只在**有人要 RGBA** 时才用
+     * （插件帧链 / acquire_frame），不进常规路径。 */
+    SwsContext*      swsRgba_ = nullptr;
+    int              swsRgbaW_ = 0, swsRgbaH_ = 0;
+    int              swsRgbaCs_ = -1, swsRgbaRange_ = -1;
     SwrContext*      swr_ = nullptr;
     int              swsW_ = 0, swsH_ = 0, swsFmt_ = -1;
     /* 当前 swscale 上下文所用的色彩矩阵与范围（enum YuvMatrix / 0|1）。
@@ -260,6 +285,11 @@ private:
     std::atomic<int64_t> audioLeadBytes_{0};
     double   extPts_ = 0.0;
     double   extLastTick_ = 0.0;
+    /* 预热：第一帧上屏前冻结主时钟（见 prerollPending()）。 */
+    std::atomic<bool> prerollPending_{false};
+    double   prerollTick_ = 0.0;
+    double   prevPumpTick_ = 0.0;   /* 上次 pumpFrame 的时刻，用于诊断成批丢帧 */
+    double   lastDropLogTick_ = 0.0;/* 丢帧日志限流（1 条/秒） */
     int      bytesPerSec_ = 0;
     /* 音频时钟停滞检测：设备打开但不出声（例如未连接蓝牙耳机）时退回墙钟 */
     double   lastAudioClock_ = 0.0;

@@ -51,7 +51,7 @@ pluginplayer selftest                           :: 4) 全链路自检（样例�
 |---|---|---|---|---|
 | 工具链冒烟 | `build.py --smoke` | SDL3/FFmpeg 能否链接、能否解出 h264/vp9/aac、音频子系统能否出声 | 几秒 | 编译器 + vendor/ |
 | 插件 API 回归 | `build.py --apitest` | 句柄唯一性、撤销订阅的隔离性、未知句柄被安全忽略、重复撤销幂等 | 几秒 | 编译器 |
-| **C++ 单元测试** | `build.py --unit` | 83 项：字符串/路径白名单/严格 JSON/SHA-256/PNG 结构/抓屏取证像素占比/事件总线四模式/注册表撤销/配置持久化 | 3 秒 | 编译器（**不需要 vendor/**） |
+| **C++ 单元测试** | `build.py --unit` | 89 项：字符串/路径白名单/严格 JSON/SHA-256/PNG 结构/抓屏取证像素占比/色彩矩阵取值/事件总线四模式/注册表撤销/配置持久化 | 3 秒 | 编译器（**不需要 vendor/**） |
 | **Python 单元测试** | `-m unittest discover -s tests/python` | 108 项：CLI 参数校验、令牌解析、垫片字节契约、门禁解析器、生成器口径 | 1 秒 | Python 标准库 |
 | **全链路自检** | `pluginplayer selftest` 或 `--selftest` | 插件加载、服务/命令注册、开媒体、解码显示帧数、seek 精度、插件命令（含返回码）、**抓屏且断言图中确有画面**、二次打开媒体、热重载**无泄漏** | 4–5 秒 | 构建产物（媒体会自动生成） |
 | **色彩还原回归** | `tests/color_check.py` | YUV→RGB 的矩阵与电平范围（现造参考素材 + 读像素比对期望 RGB + 同码流不同标注的 A/B） | 3–5 秒 | Windows + 随包 ffmpeg + 构建产物 |
@@ -215,7 +215,7 @@ SDL3/FFmpeg 的 Windows 二进制 + Winsock2。因此：
 最省事的做法是一条命令：
 
 ```bat
-ci.bat                                          :: 门禁 → 两种单测 → 冒烟 → 自检 → CLI 回归（约 60 秒）
+ci.bat                                          :: 门禁 → 两种单测 → 冒烟 → 自检 → 色彩 → CLI → 发布（约 2 分钟）
 ```
 
 想快就只跑门禁（<1 秒、不需要构建产物、也不需要 vendor/）：
@@ -246,6 +246,35 @@ git config core.hooksPath .githooks
 之后每次 `git commit` 会自动跑 `tools/verify.py`（只跑静态门禁，不构建、不联网）。
 这与 `deepseek-harness-master` 用 lefthook 做 pre-commit 是同一个思路：
 本地钩子只放"快而必要"的检查，完整矩阵交给别处。不想用就 `git config --unset core.hooksPath`。
+
+---
+
+## 6b. 怎么量播放性能（**别用 `--selftest`**）
+
+`--selftest` **不能**用来量渲染/上传路径的性能，因为它自己会污染口径：它要为证据图
+把每帧物化成 RGBA（CPU 逐像素转换），于是量到的是"物化开销"而不是播放管线。
+本仓库在这上面栽过两次（见 README 验证结果 §17），所以性能改进一律按下述方法量。
+
+**方法（每一步都不可省）**
+
+1. **真实播放**：`pluginplayer --hidden <媒体>`，不要 `--selftest`。
+2. **控制通道采样**：连上 RPC，周期性 `player.stats`，取 `decoded / displayed / dropped`
+   **增量**（不是绝对值 —— 连接握手期间已经放过一段，绝对值里混着启动期的数）。
+3. **读进程 CPU 时间**：`GetProcessTimes` 的 kernel+user，纯 ctypes，不依赖 psutil。
+4. **归一化成 `cpu/帧 = cpu增量 / displayed增量`** —— 这个指标能抵消时钟快慢、
+   窗口模式、采样窗口长短带来的差异，是唯一可跨次比较的数。
+5. **同一份二进制上做 A/B**：用环境变量切路径，不要拿两次不同构建的数字比。
+   - `PP_NO_NV12=1` 强制 RGBA 上传路径 ↔ 默认 NV12
+   - `PP_NO_HWDEC=1` 强制软解 ↔ 默认 D3D11VA 硬解
+6. **素材要选"能压出差距"的**：用 30 fps 而不是 60 fps 的长片，让 `pumpFrame()` 的
+   追帧机制不会被"帧间隔大"悄悄掩盖；并且**至少一个分辨率是明显超配的**（如 4K）。
+
+**读结果时的两个坑**
+
+- `dropped` 只反映"帧晚于主时钟被整批跳过"，**不等于**卡顿本身。要配合 `pumpFrame()`
+  的丢帧 WARN 一起看（它给出"距上次取帧的间隔"与队列深度，见 ARCHITECTURE §3a）。
+- 中文/UTF-8 输出在 PowerShell 里被重定向会按控制台代码页解码，落盘会乱码 ——
+  那是**捕获假象**，不是程序问题。验证子进程的真实字节请直接让脚本自己写文件。
 
 ---
 

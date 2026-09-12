@@ -234,6 +234,10 @@ bool Player::open(const std::string& path) {
     nextAudioPts_ = 0.0;
     extPts_ = 0.0;
     extLastTick_ = (double)SDL_GetTicks() / 1000.0;
+    /* 进入预热：解码器冷启动期间主时钟必须冻在 0，否则开头几帧一解出来就已经"迟到"。
+     * 无视频轨时不必预热（没有帧可等）。 */
+    prerollTick_ = extLastTick_;
+    prerollPending_ = (vStream_ >= 0);
     paused_ = false;
     eof_ = false;
     abort_ = false;
@@ -425,6 +429,9 @@ void Player::close() {
     ring_.clear();
 
     if (sws_) { sws_freeContext(sws_); sws_ = nullptr; }
+    if (swsRgba_) { sws_freeContext(swsRgba_); swsRgba_ = nullptr; }
+    swsRgbaW_ = swsRgbaH_ = 0;
+    swsRgbaCs_ = swsRgbaRange_ = -1;
     if (swr_) { swr_free(&swr_); swr_ = nullptr; }
     if (vCtx_) avcodec_free_context(&vCtx_);
     closeHwDevice();      /* avcodec_free_context 会放开它自己那份 hw_device_ctx 引用 */
@@ -706,8 +713,10 @@ void Player::videoDecodeLoop() {
                 if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != src->format ||
                     swsCs_ != cc.matrix || swsRange_ != cc.fullRange) {
                     if (sws_) sws_freeContext(sws_);
+                    /* 目标是 NV12（不是 RGBA）：这一步只做像素格式重排、不做 YUV→RGB ——
+                     * 矩阵与范围由渲染层的 NV12 纹理交给 GPU 做（见 app.cpp 的纹理创建）。 */
                     sws_ = sws_getContext(w, h, (AVPixelFormat)src->format,
-                                          w, h, AV_PIX_FMT_RGBA,
+                                          w, h, AV_PIX_FMT_NV12,
                                           SWS_BILINEAR, nullptr, nullptr, nullptr);
                     swsW_ = w; swsH_ = h; swsFmt_ = src->format;
                     swsCs_ = cc.matrix; swsRange_ = cc.fullRange;
@@ -719,11 +728,12 @@ void Player::videoDecodeLoop() {
                     }
                     /* sws_getContext() 不接受色彩信息，只能在建好之后补上。
                      * 参数依次是：输入系数表 / 输入范围 / 输出系数表 / 输出范围。
-                     * 输出是 RGBA，所以 dstRange 恒为 1（全范围）。
-                     * 注意：只传 srcRange、不传 inv_table 在级联路径上无效 —— 两者都要给。 */
+                     * 这里是 YUV→YUV 重排，**两端范围必须都是素材自己的范围** ——
+                     * 写 1(全范围) 会把有限范围的值错误展开，画面就废了。
+                     * 矩阵只影响 YUV→RGB，重排用不上，但一起给保持一致。 */
                     const int* coeffs = sws_getCoefficients(cc.matrix);
                     int cr = sws_setColorspaceDetails(sws_, coeffs, cc.fullRange,
-                                                     coeffs, 1, 0, 1 << 16, 1 << 16);
+                                                     coeffs, cc.fullRange, 0, 1 << 16, 1 << 16);
                     PP_INFO("色彩: 矩阵=%s 范围=%s（来源=%s，cs=%d range=%d，%dx%d）",
                             cc.matrix == YUV_MATRIX_BT709 ? "BT.709" :
                             cc.matrix == YUV_MATRIX_BT2020 ? "BT.2020" :
@@ -735,18 +745,28 @@ void Player::videoDecodeLoop() {
                         PP_WARN("sws_setColorspaceDetails 失败(%d)：将按 swscale 默认矩阵转换", cr);
                 }
 
+                /* NV12 缓冲：Y 平面 nvPitch*h，紧随其后是交错的 UV 平面。
+                 * 两块连续存放是有意的 —— SDL 的 NV12 上传按
+                 * `UVplane = Yplane + rect->h * pitch` 取 UV，与之一致。
+                 * pitch 取偶数对齐：SDL 用 (pitch+1)&~1 算 UV 行距，
+                 * 奇数宽度会让写入与读取的行距对不上。 */
+                const int nvPitch = (w + 1) & ~1;
                 auto vf = std::make_shared<VideoFrame>();
                 vf->w = w;
                 vf->h = h;
-                vf->pitch = w * 4;
-                vf->rgba.resize((size_t)vf->pitch * h);
+                vf->nv12Pitch = nvPitch;
+                vf->nv12.resize((size_t)nvPitch * h + (size_t)nvPitch * ((h + 1) / 2));
+                vf->colorMatrix = cc.matrix;
+                vf->fullRange = cc.fullRange;
                 vf->pts = pts;
                 vf->duration = dur;
                 vf->serial = serial;
                 vf->index = frameIndex_.fetch_add(1);
 
-                uint8_t* dst[4] = {vf->rgba.data(), nullptr, nullptr, nullptr};
-                int dstLs[4] = {vf->pitch, 0, 0, 0};
+                uint8_t* dst[4] = {vf->nv12.data(),
+                                   vf->nv12.data() + (size_t)nvPitch * h,
+                                   nullptr, nullptr};
+                int dstLs[4] = {nvPitch, nvPitch, 0, 0};
                 sws_scale(sws_, src->data, src->linesize, 0, h, dst, dstLs);
                 if (src != fr) av_frame_unref(src);   /* 硬件帧下载缓冲，复用不释放 */
                 av_frame_unref(fr);
@@ -975,6 +995,21 @@ double Player::videoClockValue() {
 double Player::masterClock() {
     double now = (double)SDL_GetTicks() / 1000.0;
 
+    /* 预热期：主时钟冻住不动，等第一帧到齐再从 0 起跑。
+     * 只在冷启动用（open()），seek 不走这条路 —— seek 的"快出画"靠的是
+     * flushAfterSeek 里的 dropBefore_，语义不同，不能混。 */
+    if (prerollPending_.load()) {
+        if (now - prerollTick_ > 2.0) {
+            /* 兜底：2 秒还没出帧（视频轨损坏/解码器卡死），不能让时钟一直冻着，
+             * 否则整个播放看起来像卡住。放开并记一条警告。 */
+            PP_WARN("预热超时（第一帧 2 秒未到），放开主时钟");
+            prerollPending_ = false;
+        } else {
+            extLastTick_ = now;
+            return extPts_;
+        }
+    }
+
     /* 播放结束（demux 读完且缓冲排空）后不再推进时钟，避免 position 超过时长 */
     if (finished()) {
         extLastTick_ = now;
@@ -1014,6 +1049,7 @@ double Player::masterClock() {
 
 bool Player::pumpFrame() {
     double master = masterClock();
+    double nowTick = (double)SDL_GetTicks() / 1000.0;
     std::shared_ptr<VideoFrame> pick;
     int dropped = 0;
 
@@ -1026,6 +1062,22 @@ bool Player::pumpFrame() {
         }
     }
     vfCv_.notify_one();
+
+    /* 成批丢帧是可诊断事件：一次弹掉多帧只有两种成因 ——
+     *   ① 主时钟两次调用之间跳过了整帧间隔（本线程被长时间阻塞）；
+     *   ② 解码供不上，帧积在队列里，主时钟追上来把旧的整批挤掉。
+     * 记下"距上次 pump 的间隔"与主时钟领先量，两者一比就能区分。 */
+    if (dropped > 0) {
+        double gapMs = (prevPumpTick_ > 0.0) ? (nowTick - prevPumpTick_) * 1000.0 : -1.0;
+        /* 限流 1 条/秒：真跟不上时这段会每帧都命中，不做限流会把日志刷爆。 */
+        if (nowTick - lastDropLogTick_ >= 1.0) {
+            lastDropLogTick_ = nowTick;
+            PP_WARN("丢帧 %d（主时钟 %.3f，本帧 pts %.3f，距上次取帧 %.1f ms，队列深 %d/%d）",
+                    dropped, master, pick ? pick->pts : -1.0, gapMs,
+                    (int)vframes_.size(), (int)VIDEO_QUEUE_MAX_FRAMES);
+        }
+    }
+    prevPumpTick_ = nowTick;
 
     if (!pick) {
         /* 没有到点可显示的帧：本轮什么都不做。
@@ -1051,6 +1103,8 @@ bool Player::pumpFrame() {
         std::lock_guard<std::mutex> lk(curMu_);
         current_ = pick;
     }
+    /* 第一帧上屏 = 预热结束，主时钟从这一刻开始走（宿主随即启动音频设备）。 */
+    if (prerollPending_.load()) prerollPending_ = false;
     return true;
 }
 
@@ -1062,8 +1116,48 @@ std::shared_ptr<VideoFrame> Player::currentFrame() const {
 std::shared_ptr<VideoFrame> Player::copyCurrentFrame() {
     std::lock_guard<std::mutex> lk(curMu_);
     if (!current_) return nullptr;
+    /* 插件（acquire_frame）拿到的必须是 RGBA：在这里按需物化，
+     * 而不是让插件去理解 NV12（PP_FrameView 的契约仍是 RGBA8888）。 */
+    materializeRgba(current_);
     auto c = std::make_shared<VideoFrame>(*current_);
     return c;
+}
+
+bool Player::materializeRgba(const std::shared_ptr<VideoFrame>& f) {
+    if (!f) return false;
+    if (f->rgbaReady) return true;
+    if (f->w <= 0 || f->h <= 0 || f->nv12.empty()) return false;
+
+    const int pitch = f->w * 4;
+    if (f->rgba.size() != (size_t)pitch * (size_t)f->h)
+        f->rgba.resize((size_t)pitch * (size_t)f->h);
+
+    if (!swsRgba_ || swsRgbaW_ != f->w || swsRgbaH_ != f->h ||
+        swsRgbaCs_ != f->colorMatrix || swsRgbaRange_ != f->fullRange) {
+        if (swsRgba_) sws_freeContext(swsRgba_);
+        swsRgba_ = sws_getContext(f->w, f->h, AV_PIX_FMT_NV12,
+                                  f->w, f->h, AV_PIX_FMT_RGBA,
+                                  SWS_BILINEAR, nullptr, nullptr, nullptr);
+        swsRgbaW_ = f->w; swsRgbaH_ = f->h;
+        swsRgbaCs_ = f->colorMatrix; swsRgbaRange_ = f->fullRange;
+        if (!swsRgba_) { PP_ERROR("NV12→RGBA 上下文创建失败"); return false; }
+        /* 输出是 RGBA → dstRange 取 1（全范围）。与解码侧同款：
+         * inv_table 与 srcRange 必须同时给。 */
+        const int* coeffs = sws_getCoefficients(f->colorMatrix);
+        sws_setColorspaceDetails(swsRgba_, coeffs, f->fullRange,
+                                 coeffs, 1, 0, 1 << 16, 1 << 16);
+    }
+
+    const uint8_t* src[4] = {f->nv12.data(),
+                             f->nv12.data() + (size_t)f->nv12Pitch * (size_t)f->h,
+                             nullptr, nullptr};
+    int srcLs[4] = {f->nv12Pitch, f->nv12Pitch, 0, 0};
+    uint8_t* dst[4] = {f->rgba.data(), nullptr, nullptr, nullptr};
+    int dstLs[4] = {pitch, 0, 0, 0};
+    sws_scale(swsRgba_, src, srcLs, 0, f->h, dst, dstLs);
+    f->pitch = pitch;
+    f->rgbaReady = true;
+    return true;
 }
 
 void Player::writeBackCurrentFrame(const std::shared_ptr<VideoFrame>& f) {

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 
@@ -41,6 +42,13 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     winH_ = winH;
     hidden_ = hidden;
     audioEnabled_ = audioEnabled;
+
+    /* PP_NO_NV12=1 强制 RGBA 上传路径 —— 只用于同一份二进制上做 NV12/RGBA 的 A/B 基准。 */
+    {
+        const char* v = getenv("PP_NO_NV12");
+        forceRgba_ = (v && *v && *v != '0');
+        if (forceRgba_) PP_INFO("PP_NO_NV12=1：强制 RGBA 上传路径（基准对比用，非正常播放路径）");
+    }
 
     SDL_InitFlags initFlags = SDL_INIT_VIDEO;
     if (audioEnabled) initFlags |= SDL_INIT_AUDIO;
@@ -140,18 +148,37 @@ bool App::openAudio() {
     });
     player_.setAudioActive(true);
     applyAudioParams();
+    /* 预热：解码器还没吐出第一帧时**先不启动音频设备**。
+     * 否则音频立刻按实时速率往前跑，主时钟（音频驱动）随之走掉 ~0.2 s，
+     * 视频头几帧一解出来就已经迟到、被整批丢掉 —— 声音从 0 开始、画面却从 0.2 s 开始。
+     * 推迟到第一帧上屏再启动，A/V 一起从 0 起跑（见 Player::prerollPending）。 */
+    if (player_.prerollPending()) {
+        audioAwaitPreroll_ = true;
+        PP_INFO("音频设备已打开，等待第一帧上屏后再启动（预热）");
+        return true;
+    }
     SDL_ResumeAudioStreamDevice(audioStream_);
     PP_INFO("音频输出已就绪: %d Hz / %d ch / S16", spec.freq, spec.channels);
     return true;
 }
 
 void App::closeAudio() {
+    audioAwaitPreroll_ = false;
     if (audioStream_) {
         SDL_DestroyAudioStream(audioStream_);
         audioStream_ = nullptr;
     }
     player_.setAudioActive(false);
     player_.setAudioFlushCallback(nullptr);
+}
+
+void App::stepAudioPreroll() {
+    if (!audioAwaitPreroll_ || player_.prerollPending()) return;
+    audioAwaitPreroll_ = false;
+    if (audioStream_) {
+        SDL_ResumeAudioStreamDevice(audioStream_);
+        PP_INFO("预热结束（第一帧已上屏），音频设备已启动");
+    }
 }
 
 void App::stepAudioLead() {
@@ -352,8 +379,24 @@ void App::handleKey(const SDL_Event& e) {
 
 /* ======================= 帧泵 + 上传 ======================= */
 
+bool App::makeFrameView(const std::shared_ptr<VideoFrame>& f, PP_FrameView* view) {
+    if (!f || !view) return false;
+    if (!player_.materializeRgba(f)) return false;
+    view->data = f->rgba.data();
+    view->width = f->w;
+    view->height = f->h;
+    view->pitch = f->pitch;
+    view->format = PP_PIXFMT_RGBA8888;
+    view->pts = f->pts;
+    view->index = f->index;
+    view->serial = f->serial;
+    return true;
+}
+
 bool App::pumpAndUpload(bool force) {
     if (!player_.isOpen()) return false;
+
+    stepAudioPreroll();
     player_.pumpFrame();
 
     /* currentFrame() 返回 shared_ptr 副本，插件/seek 并发改动 current_ 也不会悬空 */
@@ -366,43 +409,88 @@ bool App::pumpAndUpload(bool force) {
     if (!force && frame->index == lastUploadedIndex_) return false;
     lastUploadedIndex_ = frame->index;
 
-    /* 插件帧处理链（WATERFALL：可原地改写像素 / 中止链 / 丢弃帧）。
-     * 帧的格式必须是 RGBA：插件的契约就是"可写的 RGBA 像素"。
-     * 2026-09-12 试过把这里换成 NV12 纹理 + GPU 做 YUV→RGB，实测**在本项目的
-     * 插件形态下是净损失**：内置插件启动即注册帧处理器（链恒非空），
-     * 于是每帧要多做一次 NV12→RGBA 物化，4K 掉帧从 11 涨到 78。
-     * 那条路要成立，前提是插件"不启用时不占帧链"，见 ENHANCEMENT_PLAN 的 P0-4b'。 */
-    PP_FrameView view{};
-    view.data = frame->rgba.data();
-    view.width = frame->w;
-    view.height = frame->h;
-    view.pitch = frame->pitch;
-    view.format = PP_PIXFMT_RGBA8888;
-    view.pts = frame->pts;
-    view.index = frame->index;
-    view.serial = frame->serial;
+    /* 取纹理数据：默认走 **NV12**（GPU 做 YUV→RGB，CPU 不逐像素转换，
+     * 上传量只有 RGBA 的 3/8 —— 4K 每帧 33 MB → 12.4 MB）；满足下面任一条件
+     * 就改走 RGBA 路径：
+     *   ① 有插件挂了帧处理器 —— 它会在链上原地改 RGBA 像素；
+     *   ② 这一帧的 RGBA 已经物化过（rgbaReady）—— 说明有人（如 acquire_frame）
+     *      已经拿它处理甚至写回过，此时 RGBA 才是"权威内容"，
+     *      继续用 NV12 会把插件的改动丢掉。
+     * 这两个条件都要求"插件不启用时不占帧链"（见 ARCHITECTURE §6b）。
+     *
+     * 另有一个调试开关：PP_NO_NV12=1 强制走 RGBA 上传路径。
+     * 它存在的意义是**同一份二进制**上做 A/B —— 否则"NV12 比 RGBA 快多少"
+     * 只能拿两次不同构建的数字比，版本一变就没法复核（见 docs/DEVELOPMENT 的基准一节）。 */
+    const bool chained = forceRgba_ || (host_.chain().count() > 0) || frame->rgbaReady;
+    bool useRgba = false;
 
-    int chainResult = host_.runFrameChain(&view);
-    if (chainResult == PP_CHAIN_DROP) {
-        PP_DEBUG("帧 #%lld 被插件丢弃", (long long)frame->index);
-        return false;
+    if (chained) {
+        PP_FrameView view{};
+        if (makeFrameView(frame, &view)) {
+            int chainResult = host_.runFrameChain(&view);
+            if (chainResult == PP_CHAIN_DROP) {
+                PP_DEBUG("帧 #%lld 被插件丢弃", (long long)frame->index);
+                return false;
+            }
+            useRgba = true;
+        } else {
+            PP_WARN("NV12→RGBA 物化失败，本帧跳过帧处理链（照常显示原画面）");
+        }
     }
 
-    if (!tex_ || texW_ != frame->w || texH_ != frame->h) {
-        if (tex_) SDL_DestroyTexture(tex_);
-        tex_ = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_RGBA32,
-                                 SDL_TEXTUREACCESS_STREAMING, frame->w, frame->h);
+    const uint32_t fmt = useRgba ? SDL_PIXELFORMAT_RGBA32 : SDL_PIXELFORMAT_NV12;
+    const void* pixels = useRgba ? (const void*)frame->rgba.data()
+                                 : (const void*)frame->nv12.data();
+    const int pitch = useRgba ? frame->pitch : frame->nv12Pitch;
+    /* 色彩空间必须在**进判据之前**算出来。
+     * 早期写法把它放在"建纹理"的分支里，于是判据里的 cs 恒为初值 0，
+     * `texCs_ != cs` 永远成立 —— NV12 纹理每帧都被销毁重建（4K 每帧 12 MB 反复分配）。
+     * 这个 bug 只影响 NV12 分支（RGBA 分支该判据被 !useRgba 短路），
+     * 也就是会**专门把 NV12 的账算坏**。 */
+    int cs = 0;
+    if (!useRgba) {
+        /* 矩阵与范围必须告诉 SDL，否则 GPU 会用默认（JPEG/全范围 BT.601）
+         * 去还原 —— 顺序反了就是整幅偏色。 */
+        YuvColorChoice cc;
+        cc.matrix = frame->colorMatrix;
+        cc.fullRange = frame->fullRange;
+        int fellBack = 0;
+        cs = sdlColorspaceFor(cc, &fellBack);
+        if (fellBack && !texCsFellBackWarned_) {
+            texCsFellBackWarned_ = true;
+            PP_WARN("该色彩矩阵在 SDL 里没有对应枚举（FCC/SMPTE240M），"
+                    "NV12 纹理按 BT.601 处理");
+        }
+    }
+
+    if (!tex_ || texW_ != frame->w || texH_ != frame->h || texFmt_ != fmt ||
+        (!useRgba && texCs_ != cs)) {
+        if (tex_) { SDL_DestroyTexture(tex_); tex_ = nullptr; }
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, (Sint64)fmt);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
+                              SDL_TEXTUREACCESS_STREAMING);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, frame->w);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, frame->h);
+        if (!useRgba)
+            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, (Sint64)cs);
+        tex_ = SDL_CreateTextureWithProperties(ren_, props);
+        SDL_DestroyProperties(props);
         if (!tex_) {
             PP_ERROR("创建纹理失败: %s", SDL_GetError());
             texW_ = texH_ = 0;   /* 别留下"已经有纹理"的假状态，下一轮还能重建 */
+            texFmt_ = 0;
+            texCs_ = -1;
             return false;
         }
         texW_ = frame->w;
         texH_ = frame->h;
+        texFmt_ = fmt;
+        texCs_ = useRgba ? -1 : cs;
     }
     /* 上传失败必须如实返回失败：早期版本忽略返回值，于是"纹理存在但内容没更新"
      * 会被自检当成上传成功。 */
-    if (!SDL_UpdateTexture(tex_, nullptr, frame->rgba.data(), frame->pitch)) {
+    if (!SDL_UpdateTexture(tex_, nullptr, pixels, pitch)) {
         PP_ERROR("上传帧到纹理失败: %s", SDL_GetError());
         return false;
     }
@@ -648,6 +736,9 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     int displayed = 0;
     int savedPngs = 0;
     int chainDropped = 0;
+    /* 待落盘的证据帧（延后到测量循环之后再写，见下面注释）。 */
+    struct PendingShot { std::shared_ptr<VideoFrame> frame; std::string path; };
+    std::vector<PendingShot> shots;
     int framesAvail = frames;
     /* 自检自己数"看到过哪些帧"用的序号。**不能**拿 lastUploadedIndex_ 当它用：
      * 那个成员的不变量是"只有 pumpAndUpload 会写"，自检去写就会把去重判据搞坏 ——
@@ -677,50 +768,80 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
          * 只要显示 5 帧就算通过。 */
         const int frameMin = std::max(1, frameTarget - 1);
         int stall = 0;
+        bool brokeOnDrain = false;
         while (displayed < frameTarget && (double)SDL_GetTicks() / 1000.0 < deadline) {
             rpc_.pumpMainThread();
+            stepAudioPreroll();
             player_.pumpFrame();
             auto frame = player_.currentFrame();
             if (frame && frame->index != lastSeenIdx) {
                 stall = 0;
                 lastSeenIdx = frame->index;
 
+                /* 只有"链上有处理器"或"这一帧要存 PNG 证据"时才需要 RGBA。
+                 * **不要无条件物化** —— 那会让自检本身退化成慢路径，于是 2160p 上的
+                 * decode_and_display 量的就成了"物化开销"而不是播放管线：实测那种口径下
+                 * 同一份构建会被判 FAIL（284/299），而它的真实播放能跑到 ~29 fps。 */
+                const int nextDisplayed = displayed + 1;
+                const bool savePng = (savedPngs + (int)shots.size() < 3 &&
+                    (nextDisplayed == 1 || nextDisplayed == frameTarget / 2 ||
+                     nextDisplayed == frameTarget));
+                const bool needChain = host_.chain().count() > 0;
                 PP_FrameView view{};
-                view.data = frame->rgba.data();
-                view.width = frame->w;
-                view.height = frame->h;
-                view.pitch = frame->pitch;
-                view.format = PP_PIXFMT_RGBA8888;
-                view.pts = frame->pts;
-                view.index = frame->index;
-                view.serial = frame->serial;
-                int cr = host_.runFrameChain(&view);
-                if (cr == PP_CHAIN_DROP) { chainDropped++; continue; }
+                bool haveView = false;
+                if (needChain || savePng) {
+                    haveView = makeFrameView(frame, &view);
+                    if (!haveView) PP_WARN("本帧无法物化成 RGBA，跳过帧链与证据落盘");
+                }
+                if (needChain && haveView) {
+                    int cr = host_.runFrameChain(&view);
+                    if (cr == PP_CHAIN_DROP) { chainDropped++; continue; }
+                }
 
                 displayed++;
 
-                /* 存 3 张帧 PNG 作为可视证据 */
-                if (savedPngs < 3 &&
-                    (displayed == 1 || displayed == frameTarget / 2 || displayed == frameTarget)) {
-                    std::string p = pathJoin(outDir, format("frame_%03d.png", savedPngs + 1));
-                    if (writePngRGBA(p, view.data, view.width, view.height, view.pitch)) {
-                        savedPngs++;
-                        PP_INFO("已保存帧快照: %s (%dx%d, pts=%.3f)",
-                                p.c_str(), view.width, view.height, view.pts);
-                    }
-                }
+                /* 证据帧先攥在手里，**等测量循环结束再落盘**。
+                 * 边测边写是错的：写一张 720p PNG 要 ~137 ms（4K 更久），这期间主循环
+                 * 完全停摆而主时钟照走，回到循环时队列里三四帧都已"到点"，
+                 * pumpFrame 只能整批弹掉、只留最后一帧 —— 实测**每写一张证据图固定丢 3 帧**，
+                 * 于是 decode_and_display 量的其实是"写 PNG 的开销"而非播放管线。
+                 * 帧对象是引用计数的独立对象（解码线程每帧新建），留着 shared_ptr 即安全。 */
+                if (savePng && haveView)
+                    shots.push_back({frame, pathJoin(outDir,
+                        format("frame_%03d.png", savedPngs + (int)shots.size() + 1))});
             } else {
                 stall++;
             }
             /* 已到媒体末尾且约 0.5 秒没新帧：不必白等到 deadline */
-            if (player_.finished() && stall > 250) break;
+            if (player_.finished() && stall > 250) { brokeOnDrain = true; break; }
             SDL_Delay(2);
         }
+        /* 测量结束，这才把证据图写出去（写盘开销不再计入播放口径）。 */
+        for (const auto& s : shots) {
+            PP_FrameView v{};
+            if (makeFrameView(s.frame, &v) &&
+                writePngRGBA(s.path, v.data, v.width, v.height, v.pitch)) {
+                savedPngs++;
+                PP_INFO("已保存帧快照: %s (%dx%d, pts=%.3f)",
+                        s.path.c_str(), v.width, v.height, v.pts);
+            }
+        }
+        shots.clear();
         bool hitDeadline = (double)SDL_GetTicks() / 1000.0 >= deadline;
+        /* 只报"被插件丢弃"是不够的：播放器自己会因为**帧晚于主时钟**而整批跳过
+         * （pumpFrame 把 pts <= master 的帧一次性弹空，只留最后一帧）。少帧时到底是
+         * 解码慢、时钟跑飞、还是插件丢帧，必须三样分开看 —— 否则"显示 284/300"
+         * 这种结论没法定位，早期版本就是因此反复误判。 */
+        PP_PlaybackStats st{};
+        player_.fillStats(&st);
         addStep("decode_and_display", displayed >= frameMin,
-                format("显示 %d 帧（目标 %d，可接受下限 %d；媒体约 %d 帧可用）%s，被插件丢弃 %d 帧",
+                format("显示 %d 帧（目标 %d，可接受下限 %d；媒体约 %d 帧可用）%s%s，"
+                       "解码 %lld / 播放器丢帧 %d / 插件丢帧 %d，主时钟 %.3f 视频时钟 %.3f",
                        displayed, frameTarget, frameMin, framesAvail,
-                       hitDeadline ? "（触达时限）" : "", chainDropped));
+                       hitDeadline ? "（触达时限）" : "",
+                       brokeOnDrain ? "（队列已排空即退出）" : "",
+                       (long long)st.decoded_frames, st.dropped_frames, chainDropped,
+                       st.master_clock, st.video_clock));
     }
 
     /* --- seek --- */
@@ -735,6 +856,7 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         if (mi.has_video) {
             while (got < 5 && (double)SDL_GetTicks() / 1000.0 < dl) {
                 rpc_.pumpMainThread();
+                stepAudioPreroll();
                 player_.pumpFrame();
                 auto f = player_.currentFrame();
                 if (f && f->index != lastSeenIdx) { lastSeenIdx = f->index; got++; }
@@ -914,21 +1036,17 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
         double rDeadline = (double)SDL_GetTicks() / 1000.0 + 15.0;
         while (rOpened && rFrames < rTarget && (double)SDL_GetTicks() / 1000.0 < rDeadline) {
             rpc_.pumpMainThread();
+            stepAudioPreroll();
             player_.pumpFrame();
             auto f = player_.currentFrame();
             if (f && f->index != rSeen) {
                 rSeen = f->index;
+                /* 同上：链为空就不必物化（这里也不需要 PNG 证据）。 */
                 PP_FrameView view{};
-                view.data = f->rgba.data();
-                view.width = f->w;
-                view.height = f->h;
-                view.pitch = f->pitch;
-                view.format = PP_PIXFMT_RGBA8888;
-                view.pts = f->pts;
-                view.index = f->index;
-                view.serial = f->serial;
-                int cr = host_.runFrameChain(&view);
-                if (cr == PP_CHAIN_DROP) { rChainDrop++; continue; }
+                if (host_.chain().count() > 0 && makeFrameView(f, &view)) {
+                    int cr = host_.runFrameChain(&view);
+                    if (cr == PP_CHAIN_DROP) { rChainDrop++; continue; }
+                }
                 rFrames++;
             }
             SDL_Delay(2);
