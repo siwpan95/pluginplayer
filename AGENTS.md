@@ -107,7 +107,7 @@ F:\Python314\python.exe tools\pp_cli.py install-cli  :: 装好后可用 `pluginp
   三条约束及其原因见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#7-bat--cmd-契约三条硬约束)。
 - **生成物只能由生成器写**：`THIRD_PARTY_NOTICES.md` 由 `tools/gen_third_party_notices.py` 生成，
   手改会被 `third-party-notices` 门禁判过期。`dist/`、`run.bat`、`selftest.bat`、
-  `pluginplayer.cmd`、`pp.cmd` 同理。
+  `start-dsh.bat`、`ci.bat`、`pluginplayer.cmd`、`pp.cmd` 同理。
 - **已知限制要如实写进 README 的「已知限制」**，包括"没做"和"做得不彻底"的部分。
   宁可写「测试仍然很薄」，也不要让读者误以为它是完整的。
 

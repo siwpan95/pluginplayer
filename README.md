@@ -365,6 +365,9 @@ pluginplayer/
 │     gitee_release.py                   Gitee 建仓 / 转公开 / 发发行版（幂等，可分步重跑）
 │     gen_third_party_notices.py        第三方组件声明生成器（依赖/许可证据有变就得重跑）
 ├─ pluginplayer.cmd / pp.cmd           命令垫片（纯 ASCII + CRLF，install-cli 生成）
+├─ run.bat / selftest.bat              启动器（拖个文件上来即播）/ 一键自检（build.py 生成）
+├─ start-dsh.bat                       DeepSeek Harness Web UI 启动器（镜像自
+│                                      deepseek-harness-master，同样由 build.py 生成）
 ├─ ci.bat                              一键 CI（跑 tools/ci.py；与 run/selftest 同套生成方式）
 ├─ build.py                            构建脚本（不依赖 cmake/make；--smoke / --unit / --apitest）
 ├─ .gitignore                          排除构建产物、第三方依赖、运行期产物与令牌文件
@@ -562,7 +565,7 @@ pluginplayer/
 ```
 [OK] 已删除 build/ 与 dist/          ← 先干净重建（否则会继承上一轮的残留）
 [OK] 已生成 plugins/manifest.sha256（5 个插件）
-[OK] 已生成 run.bat 与 selftest.bat（纯 ASCII，CRLF）
+[OK] 已生成 run.bat、selftest.bat、start-dsh.bat 与 ci.bat（纯 ASCII，CRLF）
 [release] 可发布文件 17 个，合计 127.0 MB
 ```
 
@@ -616,7 +619,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 ```
 ==== 机械门禁: 18/18 通过，跳过 0 项，失败 0 项 ====
 
-[PASS] bat-ascii-crlf       4 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR
+[PASS] bat-ascii-crlf       6 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR（含 start-dsh.bat）
 [PASS] plugin-manifest      5 个 DLL 哈希与清单逐一相符
 [PASS] plugin-command-count 注册 15 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
 [PASS] native-plugin-set    5 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
@@ -631,7 +634,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
 [PASS] doc-links            22 条相对链接全部可解析
 [PASS] docs-index           4 份文档全部收录
-[PASS] readme-tree          目录结构里 47 个条目全部存在（按 basename 核对）
+[PASS] readme-tree          目录结构里 55 个条目全部存在（按 basename 核对）
 [PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/*.yml, ci.bat）
 ```
 

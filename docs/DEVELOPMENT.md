@@ -249,8 +249,15 @@ git config core.hooksPath .githooks
 
 ## 7. `.bat` / `.cmd` 契约（三条硬约束）
 
-生成这两类文件的代码是 `build.py:make_launcher()` 与 `tools/pp_cli.py:shim_text()`，
+生成这两类文件的代码是 `build.py:make_launcher()`（`run.bat` / `selftest.bat` /
+`start-dsh.bat` / `ci.bat`）与 `tools/pp_cli.py:shim_text()`（`pluginplayer.cmd` / `pp.cmd`），
 两边都遵守：
+
+> `start-dsh.bat` 是唯一一件"不属于本项目的产物"：它是 deepseek-harness 的 Web UI
+> 启动器（那边同一份由 `gen_start_bat.py` 生成），放在这里只是为了让两个双击入口挨在一起。
+> **要改它的行为，先去改 `G:\notpython\deepseek-harness-master`，再同步过来** ——
+> 那份启动器踩过的两个坑（本地镜像代理的就绪竞态、腾讯电脑管家拦 junction 导致
+> WinError 448）写在那个仓库的 `DEPLOY.md` 里。
 
 1. **纯 ASCII + CRLF**。cmd.exe 按当前代码页（本机 GBK）解读 `.bat`，混入中文在非中文
    代码页的机器上会乱码/截断。**`bat-ascii-crlf` 门禁 + `tests/cli_check.py` 都会拦。**
