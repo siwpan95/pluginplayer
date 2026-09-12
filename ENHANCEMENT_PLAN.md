@@ -520,28 +520,218 @@ README「已知限制」。
 
 **把三件事混在一个数字里，会得出错误结论 —— 本轮真的错了两次。**
 
-### P1 —— 能力扩展 + 插件化功能
+### P1 —— 能力扩展 + 插件化功能（**批次规划 v2，2026-09-13 定稿，待确认后动手**）
 
-#### P1-1 真字体 OSD（中文可读）
-- 内核：`Osd::text` 改走真实字形渲染（推荐 **`stb_truetype` 单头文件，public domain**，符合项目"零依赖"倾向；或引入 SDL_ttf 并入库 `THIRD_PARTY_NOTICES.md`）。`PP_OsdApi.text` 的 `utf8` 参数**语义不变**（本来就叫 utf8），去掉 `sanitize()` 的降级逻辑。
-- 交付：中文字体（含 `THIRD_PARTY_NOTICES` 许可声明；注意字体许可也要合规）。
-- **验收**：抓屏里能读到中文路径（P0-1 修完后才有意义）；`text_width` 对 CJK 宽度计算正确，新增 `tests/python` 单测覆盖宽字符。
+> 说明：下面是**规划**，尚未改任何实现代码。所有现状结论都带 `文件:行` 可复核，
+> 所有外部依赖都做了**联网调研 + 本机实测**（实测输出附在各处）。
 
-#### P1-2 鼠标事件通道 + 通用叠加层
-- 内核：`pollEvents()` 增加 `SDL_EVENT_MOUSE_BUTTON_* / MOUSE_MOTION / MOUSE_WHEEL`，构造 `PP_MouseEvent`，`dispatch(PP_TOPIC_UI_MOUSE, ...)`（BAIL 模式**已经登记好了**，`eventbus.cpp:15`）。
-- 新增 `PP_OverlayApi`：让插件能推"位图叠加层"（RGBA 图层 + 位置 + 时间区间），内核负责合成。这是字幕/弹幕/水印/缩略图预览的**通用底座**。
-- **验收**：新增 API 回归用例（`tests/plugin_apitest` 风格），断言"鼠标事件被插件消费后内核不再响应"（BAIL 语义）与"叠加层按 owner 撤销后不残留"。
+#### P1-0 结论卡（TL;DR）
 
-#### P1-3 字幕（做成插件）
-- 内核提供能力：字幕轨枚举/切换、把字幕包交给解码器、把解码结果（文本或位图）经通用叠加层输出。
-- `subtitles` 原生插件：承载 **libass**（渲染 ASS/SSA 样式）、SRT→ASS 转换、外部字幕加载、字体/样式配置。libass 为 ISC 许可，**与项目 GPL-3.0 兼容**，但必须登记进 `THIRD_PARTY_NOTICES.md` 并重跑生成器。
-- 备选更轻的路线：只用 FFmpeg 自带文本字幕解码（不引 libass），代价是 ASS 特效/样式基本丢失。**建议先做轻路线打通链路，再上 libass**。
-- **验收**：`--selftest` 新增 `subtitle_render` 步骤（含"字幕关闭时该步骤跳过且不计通过"）；抓屏能读出字幕文字（依赖 P0-1/P1-1）。
+| # | 结论 | 依据 |
+|---|---|---|
+| 1 | P1 拆成 **4 批**：a 字体 OSD → b 鼠标+叠加层 → c 字幕 → d 多轨/设备。a 是其余各项的前置 | c 需要 b 的叠加层；c 的字幕渲染依赖 a 的真字体 |
+| 2 | **真字体用 `stb_truetype` v1.26**（195 KB，public domain / Unlicense 二选一），不引入 SDL_ttf / FreeType | 实测 raw 可达、体积；与项目"零依赖单头文件"倾向一致 |
+| 3 | **微软雅黑不能随包分发**（方正版权，商业使用需授权）—— 随包字体只能用 OFL/Apache 的开源中文字体 | 多个来源一致；本机 `C:\Windows\Fonts\msyh.ttc` 不可分发 |
+| 4 | 中文字体建议 **先走"运行期加载系统字体"**（零分发风险），随包 OFL 子集字体作为可选增强 | 合规风险最低且能立刻解决"中文不可读" |
+| 5 | **libass 依赖树过重**（freetype + fontconfig + fribidi + harfbuzz），字幕先走 FFmpeg 自带文本字幕解码的轻路线 | 调研结论；轻路线零新增依赖 |
+| 6 | 新增能力**全部走插件**：内核只提供"能力通道"（字体渲染、鼠标事件、叠加层、轨道枚举），功能仍由插件承载 | 架构红线：Cordis "一切皆插件" 不破 |
 
-#### P1-4 多轨与设备选择
-- 内核：枚举 `AVMEDIA_TYPE_AUDIO/SUBTITLE` 全部轨道；`SDL_GetAudioPlaybackDevices`（`SDL_audio.h:547`）接出设备列表与切换；`PP_MediaInfo` 增加轨道数组（**注意：这是 ABI 变更**）。
-- 插件：`track_selector` / `audio_device`。
-- **验收**：RPC 新增方法 `player.tracks` / `player.select_track` / `audio.devices` / `audio.set_device`，同步 `ARCHITECTURE.md` §7.2 方法一览（`rpc-methods-align` 门禁会拦）。
+**建议顺序与收益**：P1-a 单独一批（收益最直接：中文界面立刻可读，且是 P1-c 的前置）；
+P1-b + P1-c 合并为一批（叠加层是字幕的底座，一起做避免接口改两遍）；P1-d 最后或按需。
+
+---
+
+#### P1-1 现状（代码实证，逐条可复核）
+
+| 项 | 现状 | 证据 |
+|---|---|---|
+| OSD 文字 | 用 SDL 调试点阵字 `SDL_RenderDebugText`，`sanitize()` 把 **非 ASCII 全部降级成 `?`** | `osd.cpp:44-55`（sanitize）、`osd.cpp:57-66`（text） |
+| 文字宽度 | `strlen(s) * 8 * scale` —— 对 UTF-8 中文必然错（一个汉字 3 字节会被当成 3 个英文字符） | `osd.cpp:68-71`；CJK 全宽也完全没考虑 |
+| 鼠标事件 | 主题 `PP_TOPIC_UI_MOUSE` **已注册为 BAIL**，但 `pollEvents()` **只处理键盘与窗口 resize**，没有任何鼠标分支 | `player_plugin.h:168`、`eventbus.cpp:15`、`app.cpp:272-276` |
+| 鼠标负载结构 | `PP_MouseEvent` **不存在**（SDK 里没有定义） | 全仓搜索 `PP_MouseEvent` 无匹配 |
+| 字幕 | 全仓无字幕解码；`set_window_subtitle` **只改窗口标题** | `player_plugin.h:383` |
+| 叠加层 | 无通用叠加层；OSD 只能画文字/面板/矩形/线/频谱，插件无法推自定义位图 | `osd.h:22-32` |
+| 多轨 | 只取"最佳"音视频流，`PP_MediaInfo` 无轨道数组 | `player.cpp` 的 `av_find_best_stream` |
+
+---
+
+#### P1-2 外部依赖调研（联网 + 本机实测）
+
+**① `stb_truetype`（字体光栅化）**
+
+| 项 | 值 |
+|---|---|
+| 版本 / 体积 | **v1.26，199,192 字节（≈195 KB）**（实测 `Content-Length`） |
+| 许可 | 文件头原文：`public domain`；另提供 **MIT** 作为备选 —— **二选一，任选其一即可** |
+| 可达性 | `https://raw.githubusercontent.com/nothings/stb/master/stb_truetype.h` → **200**（本机实测） |
+| 关键能力 | `stbtt_InitFont`（从内存解析）、`stbtt_GetFontOffsetForIndex`（**支持 TTC 字体集合**，本机 `msyh.ttc` 正是 TTC）、`stbtt_GetCodepointHMetrics`、`stbtt_GetPackedQuad` |
+
+**② 中文字体（合规关键）**
+
+| 字体 | 许可 | 是否可随包分发 | 体积（实测） |
+|---|---|---|---|
+| 微软雅黑 `msyh.ttc` | **方正版权**（微软委托设计） | **否** —— 个人屏幕显示免费，商业使用/再分发需授权 | 本机已有（`C:\Windows\Fonts`） |
+| 思源黑体 / Noto Sans CJK | **SIL OFL 1.1** | **是**（可商用、可修改、可与软件捆绑再分发；禁止单独出售字体文件） | 8,429,224 B（SourceHanSansCN 子集 OTF） |
+| Noto Sans SC | SIL OFL 1.1 | 是 | 8,331,336 B（SubsetOTF/SC） |
+| 文泉驿微米黑 | GPLv3 + Apache 2.0 | 是（GPL 与本项目一致） | — |
+
+- **注意**：部分中文资料把思源黑体写成"Apache 2.0"，与官方 `LICENSE.txt`（OFL 1.1）不一致。
+  **实施第一步必须是拉取 LICENSE 原文核对**，再写进 `THIRD_PARTY_NOTICES.md` —— 不能照抄二手资料。
+- 本机**没有** Noto Sans CJK / 思源黑体（实测 `C:\Windows\Fonts` 只有 msyh/simhei/simsun/Deng 等系统字体）。
+
+**③ 字幕渲染（libass）**
+
+| 项 | 值 |
+|---|---|
+| 许可 | 仓库标注 **ISC**（与本项目 GPL-3.0 兼容）；FSF 目录记录为 **GPLv2+ / ISC / other-1** 混合 |
+| 依赖树（重） | freetype + fontconfig + fribidi + harfbuzz（4 个原生库要一起构建并入库） |
+| 结论 | 与本项目"零依赖"倾向冲突、构建工作量是量级跳跃。**建议 P1-c 先走轻路线**（FFmpeg 自带文本字幕解码），libass 作为后续可选项 |
+
+---
+
+#### P1-3 门禁约束（决定方案可行性，先认清再动手）
+
+| 门禁 | 影响 | 说明 |
+|---|---|---|
+| `portable-modules` | **有利** | 只检查 `util/config/eventbus/registry` 八个文件（`tools/verify.py` 的 PORTABLE 清单）—— **`osd.cpp` 不在其中**，字体加载可以用 Windows API（如遍历 `C:\Windows\Fonts`）；但**纯逻辑（UTF-8 解码、宽度计算）要放 `util.cpp` 才能进 Linux 单测** |
+| `release-payload` | **要同步** | 当前声明 **17 文件 / 127 MB**，门禁会拿 README 写的数字与 `dist/` 实际比对。随包字体会变成 18 文件 / ~135 MB → README 与 `dist/` 两边都要更新 |
+| `third-party-notices` | **要登记** | 生成器有"许可事实表"，新增 stb（PD/Unlicense）与字体（OFL 1.1）两条，每条要有 `evidence`（原文依据）+ 核实命令 |
+| `versions-align` | 要同步 | 若新增/升级依赖版本，README 依赖表要跟上 |
+| **ABI** | **会变更** | `PP_MouseEvent`、`PP_OverlayApi`、轨道数组都是 ABI 新增 → `PP_ABI_VERSION` 2 → **3**，宿主与 5 个插件全部重编（`build.py` 一起编，天然满足） |
+| `plugin-command-count` / `rpc-methods-align` | 要同步 | P1-d 新增 RPC 方法时，README / `tests/cli_check.py` / `docs/CLI.md` / `ARCHITECTURE.md` 四处声明要一致 |
+
+---
+
+#### P1-a 真字体 OSD（中文可读） —— 建议第 1 批
+
+**目标**：`Osd::text` 支持任意 UTF-8（含中文），宽度计算正确；插件 `PP_OsdApi.text` 的
+`utf8` 语义**不变**（本来就叫 utf8），只是不再降级成 `?`。
+
+**设计**
+
+1. `vendor/stb/stb_truetype.h`（单头文件；`vendor/` 已在门禁 `EXCLUDE_DIRS` 中，不进扫描）。
+2. 新增 `src/core/font.cpp/.h`（或并入 `osd.cpp`）：字形图集（atlas）+ 码点→UV 缓存；
+   绘制时逐码点 `SDL_RenderTexture`。
+3. **纯逻辑放 `util.cpp`**：UTF-8 解码（`utf8Decode`）、东亚全宽判定（`isWideCjk`）、
+   文本宽度计算 —— 这三项**可移植且有单测**（`tests/unit/test_utf8.cpp`）。
+4. 字体来源（**三选一，需要拍板**）：
+
+| 方案 | 做法 | 优点 | 风险 / 代价 |
+|---|---|---|---|
+| **A（推荐先做）** | 运行期加载系统字体，按优先级 `msyh.ttc → simhei.ttf → Deng.ttf → arial.ttf`，可用 `--font <路径>` / 配置覆盖 | **零分发风险**（不分发字体文件）；立刻解决中文可读 | 依赖目标机有中文字体；不同机器字形不同 |
+| B（增强） | A + 随包一个 **OFL 子集字体**（用 fonttools 裁剪思源黑体，保留 ASCII + GB2312 常用字，目标 1~2 MB） | 表现一致、可控 | 需构建期裁剪工具；`release-payload` 数字变化；OFL 要求改名字体须改名并同许可 |
+| C | A + 随包完整 OFL 字体（~8 MB） | 最简单 | 发布物 +8 MB（127→~135 MB） |
+
+5. 回退：字体加载失败时**保留**现有 `SDL_RenderDebugText` + `sanitize()` 路径 —— 不能让
+   "字体缺失"变成"界面全空"。
+
+**涉及文件**：`vendor/stb/stb_truetype.h`（新）、`src/core/font.*`（新或并入 osd）、
+`src/core/util.*`（UTF-8 纯函数）、`src/core/osd.cpp`、`build.py`（无新增编译依赖，头文件即可）、
+`THIRD_PARTY_NOTICES.md` + `tools/gen_third_party_notices.py`（登记 stb，字体若随包再登记字体）、
+`README.md`（验证结果新增一节）。
+
+**验收（可机械判定）**
+
+- [ ] `tests/unit/test_utf8.cpp`：UTF-8 解码（1~4 字节、非法序列）、CJK 全宽判定、
+      `textWidth("播放") == 2 * textWidth("ab")` 级别的不变式 —— **≥8 项**，且可在 Linux 跑。
+- [ ] 自检新增/改造步骤：抓屏里能读到中文路径与中文提示。
+      **判据必须是像素级的**（沿用 P0-1 的教训：不能只看"文件生成了"）——
+      做法：画一段中文与画等长 `?` 串的位图**必须不同**（哈希不同），且非背景像素占比 > 阈值。
+- [ ] 无中文字体时不崩、不空屏（回退路径有单测/自检覆盖）。
+- [ ] 回归：自检 11/11、色彩 5/5、门禁 18/18、单测总数同步到 README。
+
+---
+
+#### P1-b 鼠标事件通道 + 通用叠加层 —— 建议第 2 批（与 P1-c 同批）
+
+**目标**：插件能收鼠标事件（并能"吞掉"），能推自己的位图叠加层（字幕/弹幕/水印/预览的通用底座）。
+
+**设计**
+
+1. `pollEvents()`（`app.cpp:265+`）增加分支：
+   `SDL_EVENT_MOUSE_MOTION / _BUTTON_DOWN / _BUTTON_UP / _WHEEL`（类型见
+   `vendor/sdl3/include/SDL3/SDL_events.h:183-186`），构造 `PP_MouseEvent`
+   （type / x / y / 相对位移 / 按键 / 滚轮 / 修饰键 / 时间戳），
+   `dispatch(PP_TOPIC_UI_MOUSE, &ev, sizeof(ev))` —— **BAIL 模式已登记**（`eventbus.cpp:15`）。
+2. 新增 `PP_OverlayApi`：插件注册一个 RGBA 图层（数据指针 + 宽高 + 位置 + 时间区间 + alpha），
+   内核在 `renderFrame()` 的 OSD 之后合成；**按 owner 自动撤销**（复用 `registry` 既有机制）。
+3. ABI：`PP_ABI_VERSION` 2 → **3**（`PP_MouseEvent` 新增、`PP_OverlayApi` 追加到 `PP_HostApi` 末尾）。
+
+**涉及文件**：`src/sdk/player_plugin.h`（ABI）、`src/core/app.cpp`（事件 + 合成）、
+`src/core/osd.*`（叠加层管理）、`src/core/host.cpp`（API 表挂接）、`docs/ARCHITECTURE.md`、
+`README.md`（ABI 版本号）。
+
+**验收（可机械判定）**
+
+- [ ] `tests/plugin_apitest` 风格新增用例：
+      ① 鼠标事件被插件消费后**内核不再响应**（BAIL 语义真的生效）；
+      ② 叠加层按 owner 撤销后**不残留**（数量归零）。
+- [ ] 自检新增步骤：程序化注入一个鼠标事件（`SDL_PushEvent`），断言插件收到且 BAIL 生效；
+      这一步在"无鼠标输入"的环境里也要可跑（用合成事件，不依赖真实硬件）。
+- [ ] ABI 版本号与插件清单一致（`plugin-manifest` / `versions-align` 门禁已覆盖）。
+
+---
+
+#### P1-c 字幕（做成插件） —— 建议第 2 批尾 / 第 3 批
+
+**目标**：能加载并显示外部字幕与内挂文本字幕轨。
+
+**设计（先轻路线）**
+
+1. 内核提供**能力通道**：字幕轨枚举 / 切换、把字幕包交给 FFmpeg 解码器
+   （`AV_CODEC_ID_SUBRIP` / `AV_CODEC_ID_ASS` 等），把结果（文本 + 起止时间）以事件或
+   `PP_SubtitleApi` 暴露 —— 内核**不做渲染**。
+2. `subtitles` 原生插件：加载外部 `.srt/.ass`、解析时间轴、剥离 ASS 样式标签
+   （轻路线只保留文本与换行）、用 **P1-b 的叠加层**或 **P1-a 的字体**渲染。
+3. **重路线（后续可选项）**：接入 libass 以获得完整 ASS 特效 ——
+   代价是引入 freetype/fontconfig/fribidi/harfbuzz 四件套，**建议单独立项**，不在本批。
+
+**验收（可机械判定）**
+
+- [ ] `--selftest` 新增 `subtitle_render` 步骤：
+      **字幕关闭时该步骤 SKIP 且不计入通过数**（沿用既有口径：跳过 ≠ 通过）。
+- [ ] 像素级断言：抓屏里**能读出字幕文字**（依赖 P1-a 真字体 + P0-1 抓屏判据）。
+- [ ] 时间轴正确性：给定 `.srt`，在指定时刻断言"该条字幕在/不在"（可用控制通道 seek 到时刻采样）。
+
+---
+
+#### P1-d 多轨与音频设备选择 —— 建议最后（或按需）
+
+**目标**：多音轨/字幕轨切换、音频输出设备选择。
+
+**设计**：内核枚举 `AVMEDIA_TYPE_AUDIO/SUBTITLE` 全部轨道；`SDL_GetAudioPlaybackDevices`
+接出设备列表与切换；`PP_MediaInfo` 增加轨道数组（**ABI 变更，与 P1-b 一起做可省一次 ABI 升级**）。
+插件：`track_selector` / `audio_device`。
+
+**验收**：RPC 新增 `player.tracks` / `player.select_track` / `audio.devices` /
+`audio.set_device`，同步 `ARCHITECTURE.md` §7.2 方法一览（`rpc-methods-align` 门禁会拦）；
+自检加"切换音轨后解码仍正常"步骤。
+
+---
+
+#### P1-4 风险与不足（如实登记）
+
+| 风险 | 说明 | 应对 |
+|---|---|---|
+| **字体合规** | 误用不可分发字体会造成侵权 | 方案 A（不分发）优先；若随包，**先拉 LICENSE 原文核对**再登记；不照抄二手资料的许可描述 |
+| **字形图集内存/质量** | 中文字形多，全量烤进图集不现实 | 按需烤（LRU 缓存，上限如 2048 字形）；字号按整数档缓存 |
+| **ABI 升级波及插件** | v2→v3 后旧插件加载失败 | `build.py` 同时编译宿主与全部 5 个插件，天然一致；`plugin-manifest` 门禁会拦哈希不符 |
+| **叠加层性能** | 每帧上传插件 RGBA 图层可能拖慢 4K | 只在图层内容变化时重传（脏标记），并在 4K 上用 `cpu/帧` 复测（方法见 DEVELOPMENT §6b） |
+| **字幕时间轴与 A/V 同步** | 字幕要跟主时钟而非解码顺序 | 明确以 `masterClock()` 为准；seek 后字幕要按新位置重算 |
+| **libass 依赖树** | 4 个原生库要一起构建 | 本批不走这条路；若要上，单独立项评估 |
+
+**本规划未覆盖（不在 P1 范围）**：HDR/色域（P2）、GPU 着色器画质链（P2）、播放列表 UI（P2）、
+真零拷贝（P0-4c 已判定不可行）。
+
+---
+
+#### P1-5 需要你拍板的 4 个决策点
+
+1. **字体方案**：A（系统字体，零分发风险）/ B（A + OFL 子集字体随包）/ C（A + 完整 OFL 字体 +8 MB）？
+   —— 我建议 **先 A，验收后再决定要不要 B**。
+2. **批次划分**：P1-a 单独一批，P1-b + P1-c 一批，P1-d 最后 —— 还是希望一次性做完 P1 全部？
+3. **ABI**：P1-b 与 P1-d 都有 ABI 变更，**是否合并到同一次 ABI 升级（v3）**（一次性做完 b+d 的 ABI 部分）？
+4. **libass**：P1-c 明确只做轻路线（FFmpeg 文本字幕），libass 留到以后单独立项 —— 同意？
 
 ### P2 —— 看得好 / 好用
 
