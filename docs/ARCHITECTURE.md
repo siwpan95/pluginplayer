@@ -35,14 +35,14 @@
 
 | 线程 | 职责 | 注意 |
 |---|---|---|
-| 主线程 | SDL 事件循环、`pumpFrame`、帧处理链、渲染、OSD、事件分发 | 插件回调大多在此 |
+| 主线程 | SDL 事件循环、`pumpFrame`、帧处理链、渲染、OSD、事件分发 | **插件的全部回调都在这里**（见下） |
 | demux 线程 | `av_read_frame` → 分派到视频/音频包队列；处理 seek | 通过 `interrupt_callback` 让 seek/abort 能打断阻塞读 |
-| 视频解码线程 | 收包解码 → `sws_scale` 转 RGBA → 帧队列（满则等） | `video.frame` 回调也在这条链上 |
-| 音频解码线程 | 收包解码 → `swr_convert` 转 S16 → 环形缓冲 | `audio.samples` 的数据源 |
-| SDL 音频线程 | 音频回调：从环形缓冲取数 → `SDL_PutAudioStreamData` | 回调里只做搬运，绝不做重活 |
-| RPC accept/客户端线程 | 控制通道请求处理 | 调用宿主 API 是线程安全的 |
+| 视频解码线程 | 收包解码 → `sws_scale` 转 RGBA → 帧队列（满则等） | **不调用插件**；只把帧放进 FrameQueue |
+| 音频解码线程 | 收包解码 → `swr_convert` 转 S16 → 环形缓冲 | **不调用插件**；只负责填环形缓冲 |
+| SDL 音频线程 | 音频回调：从环形缓冲取数 → `SDL_PutAudioStreamData` | 回调里只做搬运，绝不做重活，也不碰 HostApi |
+| RPC accept / 客户端线程 | 控制通道：收报文 → 入队 → 等主线程执行 → 回包 | 客户端线程**不直接调用宿主 API**（见下） |
 
-**关键约束：`AVCodecContext` 非线程安全。**
+**关键约束 1：`AVCodecContext` 非线程安全。**
 `avcodec_flush_buffers` 必须由**拥有该上下文的那条解码线程**调用。
 本项目通过「包序号（serial）」让解码线程自己发现 seek 并 flush：
 
@@ -55,6 +55,20 @@ flushAfterSeek()  清队列 / 清缓冲 / serial++      ← demux 线程
 > 这条规则是踩出来的：早期把 `avcodec_flush_buffers` 放在 demux 线程，
 > 与解码线程的 `avcodec_receive_frame` 并发访问同一个 context，
 > 表现为 **-O2 下偶发段错误 + h264「Invalid NAL unit size」**。
+
+**关键约束 2：插件回调只在主线程执行。**
+`video.frame` / `audio.samples` 的**数据**由解码线程产出，但**回调**是主线程
+取出数据后再调用的 —— 所以插件里不需要为自己的状态加锁，也绝不能阻塞。
+（早期版本的 `player_plugin.h` 把这一点写反成"回调可能在解码线程"，已更正。）
+
+**关键约束 3：控制通道请求在主线程串行执行。**
+RPC 客户端线程只做「收报文 → 入队 → 等结果 → 回包」，真正的 `handleRequest`
+由主循环每轮调 `RpcServer::pumpMainThread()` 在主线程抽干执行。
+这样 `Player`/`Host` 的大量非原子状态（`extPts_`、`lastAudioClock_`、当前帧、
+SDL 音频流…）只被一个线程触碰。
+**代价**：RPC 单次延迟被主循环帧期约束（60fps 下实测 p50 ≈ 16.6ms，吞吐约 420 req/s）。
+（早期版本让 RPC 线程直接调用宿主 API，JS 宿主每 5 秒轮询一次 stats 就会与主循环并发
+改写这些字段 —— 是一处真实的数据竞争。）
 
 ## 3. A/V 同步
 
@@ -93,6 +107,14 @@ keyint=250，8 秒视频只有 1 个关键帧），seek 到 4.8s 会实际落在
 `video.frame` 通过 `subscribe(PP_TOPIC_VIDEO_FRAME, ...)` 或
 `set_frame_processor()` 注册，两者进的是**同一条链**。
 
+**订阅句柄**：`subscribe()` 返回的 `sub_id` 由 `Host` 统一分配
+（`Host::registerSub/takeSub`），帧链订阅与事件总线订阅**共用一套 id 空间**。
+这是必要的：`FrameChain::nextId_` 与 `EventBus::nextId_` 各自从 1 开始，
+若直接把内部 id 返回给插件，同一插件订阅 `video.frame` + 任意普通主题就会拿到
+相同句柄，`unsubscribe()` 于是撤错对象。现在两套命名空间被隔离开，
+插件只需把返回的句柄原样传回 `unsubscribe()`。
+回归测试：`tests/plugin_apitest/plugin.cpp`（命令 `api.check`，返回 0 = 通过）。
+
 ## 6. 服务与注册撤销
 
 每个插件加载时分配一个**槽位号（owner）**。`Host` 在调用插件的任何回调前会
@@ -101,35 +123,74 @@ keyint=250，8 秒视频只有 1 个关键帧），seek 到 4.8s 会实际落在
 ```cpp
 int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
 //  = bus.unsubscribeAllOf + services.removeAllOf
-//    + commands.removeAllOf + chain.removeAllOf + 帧订阅适配器
+//    + commands.removeAllOf + chain.removeAllOf
+//    + 帧订阅适配器 + 订阅句柄表（subMap_）
 ```
 
 命令执行也一样：`Host::invokeCommand()` 先查出命令的 owner，再切上下文执行，
 因此插件命令里的 `config_get/set` 会写到自己 `plugin.<槽位>.*` 的命名空间。
 
-自检里的 `plugin_hot_reload` 一项就是在验证这个：
-重载前后 `订阅 4->4, 命令 15->15, 服务 2->2, 帧处理器 2->2` —— 泄漏为 0。
+自检里的 `plugin_hot_reload` 一项就是在验证这个，并且**断言数量必须完全不变**：
+`重载后 订阅 4->4, 命令 15->15, 服务 2->2, 帧处理器 2->2（无泄漏）`。
+（早期版本只断言 `commands > 0`，收集了泄漏证据却从不断言，等于这项检查永远为绿。）
 
 ## 7. 控制通道协议
 
 换行分隔 JSON，监听 `127.0.0.1`（**只绑回环**，不暴露到局域网）。
 
+### 7.1 安全模型（**默认即受保护**）
+
+控制通道能执行任意原生插件命令（写文件、退出进程），所以它不是"裸接口"：
+
+| 机制 | 实现 |
+|---|---|
+| 只绑回环 | `bind(127.0.0.1)`；且用 `SO_EXCLUSIVEADDRUSE` 而非 `SO_REUSEADDR`，防止其它进程抢占同一端口（第二个实例 bind 会得到 `10048` 并明确报错） |
+| **强制令牌认证** | 启动时用 `BCryptGenRandom` 生成 256-bit 令牌，写入 `<exeDir>/config/rpc-token.txt`（可用 `--rpc-token` 指定）。令牌**每次启动都重新生成** |
+| 认证前零能力 | 连接后第一条消息必须是 `auth`；未认证前**任何方法都返回错误**（连 `ping` 都不放行），认证失败立即断开。比较用定长时间实现 |
+| 报文长度上限 | 单条报文 4 MB，超限断开（避免无上限行缓冲把内存吃干）；换行扫描是增量的，不存在 O(n²) |
+| 并发上限 | 同时最多 8 条连接，超出直接拒绝（避免线程/资源耗尽）；`recv`/`send` 都有超时 |
+| 事件只给已认证连接 | 未认证连接收不到任何内核事件（早期版本裸连接即收到全部事件流） |
+| 请求在主线程执行 | 见 §2「关键约束 3」 |
+
+> 令牌文件在**控制通道真正监听成功之后**才写。否则第二个实例端口被占时会用新令牌
+> 覆盖掉正在运行实例的令牌文件，把它所有客户端一起搞坏。
+
+### 7.2 报文
+
 ```
-→ {"id":1,"method":"player.seek","params":{"seconds":12}}
-← {"id":1,"ok":true,"result":{"position":12.0}}
+→ {"id":1,"method":"auth","params":{"token":"<64 位 hex>"}}        ← 必须是第一条
+← {"id":1,"ok":true,"result":{"authenticated":true,"abi":1}}
+
+→ {"id":2,"method":"player.seek","params":{"seconds":12}}
+← {"id":2,"ok":true,"result":{"position":12.0}}
 ← {"event":"app.tick","data":{"position":12.0,"fps":30.0,...}}     （订阅后主动推送）
 ```
 
-方法一览：`ping`、`player.info|stats|play|pause|toggle|stop|seek|volume|mute|speed|open`、
+方法一览：`auth`、`ping`、`player.info|stats|play|pause|toggle|stop|seek|volume|mute|speed|open`、
 `command.invoke|list`、`service.list`、`plugin.list`、`topic.subscribe`（`"*"` 订阅全部）、`app.quit`。
 
-宿主事件统一经 `Host::publishTopic()` 发出：既分发给进程内订阅者，也**同步转发**给控制通道客户端。
+宿主事件统一经 `Host::publishTopic()` 发出：既分发给进程内订阅者，也同步转发给
+**已认证的**控制通道客户端。
+
+测试客户端：`tools/rpc_client.py`（会自动读令牌文件；含 23 项检查，其中 4 项是安全回归）。
 
 ## 8. 插件 ABI 设计要点
 
 - **纯 C ABI**：结构体 + 函数指针，不用 C++ 虚表 —— 插件可以用 C 写、也可以被其它语言 FFI。
-- **插件不链接 FFmpeg / SDL3**：一切能力经 `PP_HostApi` 提供，插件 DLL 只有 ~76KB，
-  不存在跟宿主争抢 DLL 版本的问题（唯一的例外是 `video_effects` 用了 `std::vector`/`<cmath>`，约 470KB）。
+- **插件不链接 FFmpeg / SDL3**：一切能力经 `PP_HostApi` 提供，因此插件很小、
+  不存在跟宿主争抢 DLL 版本的问题。实测各插件 DLL 的导入表（`objdump -p`）：
+
+  | 插件 | 大小 | 第三方运行时依赖 |
+  |---|---|---|
+  | `hotkey_ext.dll` | 39 KB | 无（仅 KERNEL32 + UCRT） |
+  | `audio_viz.dll` | 40 KB | 无 |
+  | `snapshot.dll` | 40 KB | 无 |
+  | `osd_stats.dll` | 41 KB | 无 |
+  | `video_effects.dll` | 180 KB | **`libwinpthread-1.dll`**（用了 `<cmath>`/容器，pthread 未完全静态化） |
+
+  也就是说"插件零依赖"基本成立，但 `video_effects` 是例外，发布时必须带上
+  `libwinpthread-1.dll`（`build.py` 已经会拷，内核本身也依赖它）。
+  `audio_viz` 的 FFT 是自实现、不引入任何第三方库。
 - **ABI 版本双向校验**：既查导出的 `pp_plugin_abi_version()`，也查 `PP_Plugin.abi_version`，
   再加 `PP_HostApi.struct_size`，为未来加字段留出向后兼容空间。
 - **入口符号用 C 链接**：`PP_PLUGIN_DECL` 内部自带 `extern "C"`，
@@ -137,13 +198,42 @@ int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
 - **不跨 DLL 边界传所有权**：宿主返回的 `const char*`（配置值等）由宿主持有，
   插件只读不释放；插件要用帧数据必须走 `acquire_frame`（拿副本）或帧处理链（原地改）。
 
+## 8b. 信任边界与写入白名单
+
+明确一下哪些东西是"可执行代码边界"，哪些是"数据"：
+
+| 边界 | 说明 |
+|---|---|
+| `plugins/*.dll` | **等于可执行代码**。宿主用 `LoadLibrary` 加载并调用其导出函数 —— 往这个目录丢 DLL 就是给自己装后门。目录取自 `exeDir()/plugins` 且**不递归**，因此不存在"相对 CWD 落 DLL"的问题。当前**不校验签名/哈希**。 |
+| `host-js/plugins/*.mjs` | 同样是**可执行代码**，在 Node 进程里全权限运行。 |
+| 控制通道 / Web 控制页 | 见 §7。两者都能驱动插件命令，因此都需要认证。 |
+| 控制通道令牌文件 | `config/rpc-token.txt`。能读到它就等于能控制播放器 —— 本机同用户进程本就能读，真正的边界是**操作系统用户权限**，不是这个文件。 |
+
+**插件写入白名单**：`save_png` / `write_text_file` 只允许写进白名单目录，
+默认只有 `exeDir()`（即 `dist/`）。需要写别处用 `--write-dir <目录>`
+（可重复）或 ini 的 `security.write_dirs=路径1;路径2` 追加。
+判定由 `util.cpp` 的 `normalizePath()` + `pathIsInside()` 完成：
+先用 `GetFullPathNameA` 把 `..`/`.` 折叠掉并做大小写归一，再比较前缀。
+越界写入被拒绝并打 `WARN`。
+
+> 为什么放在宿主而不是插件里：插件是不可信代码，策略必须由宿主强制。
+> 这样即便某个插件（或经 RPC 触发的插件命令）拿到任意 `path` 参数，
+> 也写不出白名单之外。
+
+**网络输入默认拒绝**：`openMedia()` 默认拒绝 `scheme://`（http/https/rtsp/rtmp/file…）
+与 UNC 路径（`\\host\share`），因为控制通道和插件都能触发 `openMedia`，
+默认放行就等于给本机装了一个"代任意来源出网"的 SSRF 原语，
+UNC 还会触发 SMB 认证（NTLM 中继面）。需要时用 `--allow-network-input` 显式开启。
+
 ## 9. 构建要点
 
 - 不用 cmake / make：`build.py` 直接调 `g++`，逐个编译、逐个链接，依赖少、排错直观。
 - 链接参数（容易踩的坑）：
   - **不能加 `-static`** —— 那会让 ld 去找 `libSDL3.a`/`libav*.a` 静态库而报「找不到」。
     正确写法是只静态化运行时：`-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic`。
-  - 插件用 `-shared` + 同样的运行时段，于是 `plugins/*.dll` **不依赖 libwinpthread**。
-  - 内核仍会 import `libwinpthread-1.dll`，打包时从编译器目录一并拷入 `dist/`。
+  - 插件用 `-shared` + 同样的运行时段。实测 5 个插件里 **4 个不依赖 `libwinpthread`**，
+    唯 `video_effects.dll` 仍会 import `libwinpthread-1.dll`（用 `objdump -p` 可复核）。
+  - 内核 import `libwinpthread-1.dll`，另外还 import `bcrypt.dll`
+    （控制通道令牌用 `BCryptGenRandom`），打包时从编译器目录一并拷入 `dist/`。
 - `dist/` 只带真正用到的 5 个 FFmpeg DLL（`avfilter`/`avdevice` 不带，省约 110MB；
   需要它们的是 ffmpeg.exe 命令行工具，在 `vendor/ffmpeg/bin/` 里）。

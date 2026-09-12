@@ -17,7 +17,7 @@
 static const PP_HostApi* g_api = nullptr;
 static int g_frames = 0;
 
-/* 帧处理链回调：拿到的就是即将显示的像素（RGBA8888，内存里是 B,G,R,A） */
+/* 帧处理链回调：拿到的就是即将显示的像素（RGBA8888，内存里是 R,G,B,A） */
 static int onFrame(PP_Host* h, PP_FrameView* v, void* user) {
     (void)h; (void)user;
     g_frames++;
@@ -27,7 +27,7 @@ static int onFrame(PP_Host* h, PP_FrameView* v, void* user) {
             uint8_t* row = v->data + (size_t)y * v->pitch;
             for (int x = 0; x < 32 && x < v->width; ++x) {
                 uint8_t* q = row + (size_t)x * 4;
-                q[0] = 40; q[1] = 40; q[2] = 240; q[3] = 255;   /* B G R A */
+                q[0] = 240; q[1] = 40; q[2] = 40; q[3] = 255;   /* R G B A：q[0]=R */
             }
         }
     }

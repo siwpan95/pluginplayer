@@ -35,7 +35,7 @@ static int onFrame(PP_Host* h, PP_FrameView* v, void* user) {
             uint8_t* row = v->data + (size_t)y * v->pitch;
             for (int x = 0; x < 32 && x < v->width; ++x) {
                 uint8_t* q = row + (size_t)x * 4;
-                q[0] = 40; q[1] = 40; q[2] = 240; q[3] = 255;   /* BGRA 顺序 */
+                q[0] = 240; q[1] = 40; q[2] = 40; q[3] = 255;   /* RGBA：q[0]=R */
             }
         }
     }
@@ -80,12 +80,16 @@ PP_PLUGIN_DECL(&g_plugin)   /* 导出 pp_plugin_query / pp_plugin_abi_version */
 ### 2. 编译
 
 ```bat
-cd G:\local\player\pluginplayer
+cd G:\local\pluginplayer
 F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
   -Isrc\sdk ^
   examples\hello_plugin\plugin.cpp -o dist\plugins\hello_plugin.dll ^
   -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 ```
+
+> 上面这条命令是**实测可编译**的（不含 `-Ivendor`，因为最小插件不需要 FFmpeg/SDL3 头文件）。
+> 也可以直接用 `build.py --apitest` 的方式做参考：它编译 `tests/plugin_apitest/plugin.cpp`
+> 用的就是同一套 `CXXFLAGS + INCLUDES + LDFLAGS_PLUGIN`。
 
 把 DLL 丢进 `dist/plugins/` 即可，下次启动自动加载（无需改动宿主）。
 想纳入常规构建，把目录名加进 `build.py` 的 `PLUGINS` 列表（约定源码路径为
@@ -100,12 +104,31 @@ F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
    - 解码信息 → `get_media_info` / `get_stats`
    - 像素 → `set_frame_processor`（原地改，最快）或 `acquire_frame`（拿副本）
    - 想要第三方库（FFT、图像处理…）→ 自己静态编进 DLL
-4. **回调里不要阻塞**。帧处理链和事件分发跑在解码/渲染路径上，长时间占用会掉帧。
-   需要重活请自己起线程。
+4. **回调线程契约**：**所有插件回调都在主线程执行**（`on_load/on_start/on_stop/on_unload`、
+   帧处理链、事件分发、命令回调都跑在 60Hz 主循环那个线程上）。
+   解码线程不直接调用任何插件。因此：
+   - 回调里**不要阻塞**：整条渲染/音频链路都在等你。
+   - 插件内部状态无需加锁（同一时刻只有一个线程进回调）。
+   - 需要重活请自己起线程，但**不要从别的线程调用 HostApi**
+     （HostApi 面向主线程；控制通道的请求也会被投递到主线程串行执行）。
 5. **插件不携带跨边界所有权**：宿主返回的 `const char*` 只读不释放；
    自己 malloc 的东西自己 free。
-6. **注意像素字节序**：`PP_PIXFMT_RGBA8888` 在内存里是
-   `B,G,R,A`（小端 0xAABBGGRR），写像素时 q[0]=B、q[2]=R。
+6. **注意像素字节序**：`PP_PIXFMT_RGBA8888` 在内存里的顺序就是
+   **`R,G,B,A`** —— 写像素时 `q[0]=R`、`q[1]=G`、`q[2]=B`、`q[3]=A`。
+   （`0xAABBGGRR` 那样的写法是把整行当 **uint32 小端**读时的值，
+   与「按字节写」的索引顺序相反，很容易写错：灰度权重
+   `q[0]*77 + q[1]*150 + q[2]*29` 只有在 q[0]=R 时才成立。）
+   一行有效像素是 `pitch` 字节，**不要假设 `pitch == width*4`**。
+7. **订阅句柄是宿主分配的、不透明的整数**：`subscribe()` 返回的 `sub_id`
+   由宿主统一分配（帧链订阅与普通主题订阅**共用一套 id 空间，不会撞号**）。
+   请原样保存、原样传给 `unsubscribe()`；不要自己拼 id，也不要拿
+   `set_frame_processor()` 返回的 id 去 `unsubscribe()`（那是另一套句柄，
+   用 `remove_frame_processor()` 撤销）。插件卸载时宿主会自动撤销它的全部注册，
+   所以通常不必手工退订。
+8. **写文件是受限的**：`save_png` / `write_text_file` 只允许写进
+   **exeDir(`dist/`) 之内**。需要写到别处时用命令行 `--write-dir <目录>`
+   追加白名单（或 ini 的 `security.write_dirs=路径1;路径2`）。
+   越界写入会被拒绝并打 `WARN`，返回值非 0。
 
 ### 4. HostApi 速查
 
@@ -123,6 +146,14 @@ F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
 | 杂项 | `app_dir/plugin_dir/asset_dir`、`ticks_ms`、`request_quit`、`set_window_subtitle`、`save_png`、`write_text_file` |
 
 `invoke_command` 的 `argv` **只含实参**，不含命令名（`argc=1, argv={"gray"}` 表示一个参数 `gray`）。
+
+两点补充：
+
+- `subscribe()` 返回的 `sub_id` 是**宿主分配的句柄**（帧链订阅与主题订阅共用同一
+  id 空间，因此不会出现「两类订阅撞号 → unsubscribe 撤错对象」）。
+  它和 `set_frame_processor()` 返回的 id 是**两套不同句柄**，撤销方式也不同。
+- `save_png` / `write_text_file` **只能写进白名单目录**（默认仅 `exeDir`）。
+  需要写到别处请用 `--write-dir` 追加。越界会被拒绝并返回非 0。
 
 ### 5. 内置插件里的现成范例
 
@@ -146,13 +177,20 @@ F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
 
 ## 二、写一个 JS 插件（Cordis，进程外）
 
-先给播放器开控制通道并启动 JS 宿主：
+先给播放器开控制通道并启动 JS 宿主。
+
+控制通道**强制令牌认证**：播放器启动时随机生成 256-bit 令牌并写入
+`dist/config/rpc-token.txt`。JS 宿主会自动读取该文件，也可以用 `--token <hex>`
+或环境变量 `PP_RPC_TOKEN` 显式传入。客户端连接后必须**第一条消息**就是 `auth`。
 
 ```bat
 dist\pluginplayer.exe --rpc-port 7911 视频.mp4
+::   启动时会打印： 控制通道: 127.0.0.1:7911   令牌文件: dist\config\rpc-token.txt
+
 cd host-js
 npm install
 node src\index.mjs --port 7911
+::   播放器还没起也没关系 —— 宿主每 2 秒重试，令牌出现后会自动连上并认证
 ```
 
 ### 1. 函数式插件：订阅事件
@@ -240,7 +278,12 @@ export const config = {}
 
 - 宿主控制台会打印装载结果与失败原因；`--exit-after N` 可让它跑 N 秒后优雅退出（自检用）。
 - 不想启动播放器也能测：`tools/rpc_client.py` 是纯 Python 客户端，可当参考实现。
-- 事件没收到？先确认 `topic.subscribe` 成功 —— `PlayerService` 连接后会自动订阅 `"*"`。
+  它已带令牌逻辑（`--token` / `PP_RPC_TOKEN` / 自动读 `dist/config/rpc-token.txt`），
+  并内置 4 项安全回归（错误令牌被拒 / 未认证调用被拒 / 超长报文被拒 / 并发连接上限）。
+- 事件没收到？先确认 `topic.subscribe` 成功 —— `PlayerService` 连接并认证后会自动订阅 `"*"`。
+  另外**未认证的连接收不到任何事件**（这是刻意设计，不是 bug）。
+- 自己写客户端时注意：控制通道的请求由**主线程**串行执行，因此单次延迟大致等于
+  一个主循环帧期（实测 60fps 下 p50 ≈ 16.6ms，吞吐约 420 req/s）。
 
 ---
 

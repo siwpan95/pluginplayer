@@ -11,11 +11,16 @@
  *        - 事件      -> host->subscribe / publish（emit）/ dispatch（waterfall·serial·bail）
  *        - 可撤销注册 -> 每个 register/subscribe 都返回句柄，on_unload 时统一撤销
  *
- * 线程约定
- *   - on_load / on_start / on_stop / on_unload 都在主线程调用。
- *   - 事件回调可能在解码线程（video.frame / audio.samples）或主线程（其余）触发。
- *     回调内**不得**阻塞、不得长时间做重活；需要重活请自行起线程。
- *   - host->* 的播放控制函数是线程安全的（内部加锁）。
+ * 线程约定（**重要，早期版本这里写反了**）
+ *   - 插件的**所有回调都在主线程**执行：on_load / on_start / on_stop / on_unload、
+ *     帧处理链（video.frame）、事件分发（audio.samples / osd.draw / ui.key …）、
+ *     命令回调，全部跑在同一个 60Hz 主循环线程上。
+ *     解码线程**不会**调用任何插件 —— 解码结果由主循环取出后再分发。
+ *   - 因此：回调内**不得阻塞**（整条渲染/音频链路都在等你）；插件内部状态
+ *     无需加锁（同一时刻只有一个线程进回调）。
+ *   - HostApi 面向主线程：**不要从自己起的线程里调用 host->***。
+ *     需要异步干活就自己起线程、把结果放进队列，在主线程回调里消费。
+ *     连接控制通道的外部请求也会被投递到主线程串行执行，同样是这个约定。
  */
 #ifndef PLAYER_PLUGIN_H
 #define PLAYER_PLUGIN_H
@@ -79,7 +84,12 @@ enum PP_LogLevel {
     PP_LOG_ERROR = 4,
 };
 
-/** 像素格式（当前仅暴露一种，插件只处理 RGBA8888）。 */
+/** 像素格式（当前仅暴露一种，插件只处理 RGBA8888）。
+ *
+ * 内存字节序：**R, G, B, A** —— 写像素时 q[0]=R、q[1]=G、q[2]=B、q[3]=A。
+ * 别被 PP_Color 的 0xAABBGGRR 写法带偏：那是把整行当 uint32 小端读时的值，
+ * 与「按字节索引」的顺序相反。灰度权重 q[0]*77 + q[1]*150 + q[2]*29 只有在
+ * q[0]=R 时才成立（可对照 src/plugins/video_effects/plugin.cpp）。 */
 enum PP_PixelFormat {
     PP_PIXFMT_RGBA8888 = 1,
 };
@@ -161,7 +171,9 @@ typedef struct PP_PlaybackStats {
     int     audio_channels;
 } PP_PlaybackStats;
 
-/** 一帧 RGBA8888 像素的可写视图。 */
+/** 一帧 RGBA8888 像素的可写视图。
+ *  data 指向首行首像素；第 y 行第 x 像素 = data + y*pitch + x*4。
+ *  **不要假设 pitch == width*4**（可能带行对齐填充），一律用 pitch 步进。 */
 typedef struct PP_FrameView {
     uint8_t       *data;    /* RGBA8888 像素，pitch 可能 > width*4 */
     int            width;
