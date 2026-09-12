@@ -132,8 +132,8 @@ def main():
         try:
             try:
                 r = c.call("auth", token="0" * 64)
-            except RuntimeError as e:
-                # 服务端认证失败后立即断开，这也是可接受的结果
+            except (RuntimeError, OSError) as e:
+                # 服务端认证失败后立即断开（RST/EOF），这也是可接受的结果
                 return {"rejected": True, "closed": str(e)}
             if r.get("ok"):
                 raise AssertionError(f"错误令牌竟然通过了认证: {r}")
@@ -146,7 +146,7 @@ def main():
         try:
             try:
                 r = c.call("player.stats")
-            except RuntimeError as e:
+            except (RuntimeError, OSError) as e:
                 return {"rejected": True, "closed": str(e)}
             if r.get("ok"):
                 raise AssertionError("未认证竟然可以调用 player.stats")
@@ -206,6 +206,8 @@ def main():
                         return {"rejected": True, "reason": line[:200]}
             except socket.timeout:
                 raise AssertionError("服务端未在超时内拒绝超长报文")
+            except (ConnectionResetError, ConnectionAbortedError) as e:
+                return {"rejected": True, "reason": f"连接被重置: {e}"}
         finally:
             c.close()
 

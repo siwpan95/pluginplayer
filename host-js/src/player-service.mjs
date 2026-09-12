@@ -59,6 +59,7 @@ export class PlayerService extends Service {
     this.counter = { requests: 0, events: 0, errors: 0 }
     this.opts = { host: '127.0.0.1', port: 7911, retryMs: 2000, token: '', tokenFile: '' }
     this._stopped = false
+    this._tokenWarned = false
   }
 
   /** 建立（并自动重连）到原生内核的控制通道 */
@@ -87,11 +88,18 @@ export class PlayerService extends Service {
     try {
       token = resolveToken(this.opts)
     } catch (e) {
+      /* 播放器可能还没启动（令牌文件尚未生成）。只报一次错，之后静默重试，
+       * 否则「先起 host-js 再起播放器」这个很自然的顺序会永久连不上。 */
       this.counter.errors++
-      this.ctx.emit('player/error', { message: String(e.message || e) })
-      this.ctx.logger?.error?.(`[player] ${e.message}`)
+      if (!this._tokenWarned) {
+        this._tokenWarned = true
+        this.ctx.emit('player/error', { message: String(e.message || e) })
+        this.ctx.logger?.warn?.(`[player] ${e.message}`)
+      }
+      if (!this._stopped) setTimeout(() => this._connect(), retryMs)
       return
     }
+    this._tokenWarned = false
     const sock = net.createConnection({ host, port })
     this.sock = sock
     sock.setEncoding('utf8')

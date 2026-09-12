@@ -280,8 +280,12 @@ const apply = (ctx, config = {}) => {
 
   const server = http.createServer(async (req, res) => {
     const send = (code, headers, body) => {
-      res.writeHead(code, Object.assign({}, SECURITY_HEADERS, headers))
-      res.end(body)
+      /* 显式给 Content-Length：避免 Node 默认走 chunked，
+       * 让裸 socket / 简易 HTTP 客户端也能直接拿到完整正文。 */
+      const buf = Buffer.from(body == null ? '' : String(body), 'utf8')
+      res.writeHead(code, Object.assign({}, SECURITY_HEADERS,
+                                        { 'Content-Length': buf.length }, headers))
+      res.end(buf)
     }
     const json = (o, code = 200) => {
       send(code, { 'Content-Type': 'application/json; charset=utf-8' },

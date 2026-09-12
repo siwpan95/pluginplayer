@@ -74,6 +74,15 @@ private:
         std::vector<std::string> topics;    /* 空 = 订阅全部 */
         std::atomic<bool>      authed{false};
         std::atomic<bool>      closing{false};
+
+        /* 关键：clientLoop 由工作线程自己执行，而线程函数结束时它持有的
+         * 最后一个 shared_ptr 会归零 → 在**仍在运行的线程内部**析构这个 Client。
+         * 此时 th 依然 joinable，std::thread 的析构函数会直接 std::terminate
+         * （实测症状：客户端一断开，整个播放器 exit 0xC0000409）。
+         * 正常退出路径由 RpcServer::stop() 负责 join；这里兜底 detach。 */
+        ~Client() {
+            if (th.joinable()) th.detach();
+        }
     };
 
     void acceptLoop();

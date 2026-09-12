@@ -271,14 +271,17 @@ void RpcServer::clientLoop(std::shared_ptr<Client> c) {
     }
 
 done:
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        clients_.erase(std::remove(clients_.begin(), clients_.end(), c), clients_.end());
-    }
+    /* 先关 socket 再摘出列表：这样 stop() 一旦看不到本客户端，
+     * 就说明它已经不再做任何 WSA 调用，避免了 WSACleanup 之后的窗口期。
+     * （摘除顺序不能反：broadcastEvent 已按 sock==-1 跳过已关闭的客户端。） */
     {
         std::lock_guard<std::mutex> lk(c->mu);
         uintptr_t sk = c->sock.exchange((uintptr_t)-1);
         if (sk != (uintptr_t)-1) ::closesocket((SOCKET)sk);
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        clients_.erase(std::remove(clients_.begin(), clients_.end(), c), clients_.end());
     }
 }
 
