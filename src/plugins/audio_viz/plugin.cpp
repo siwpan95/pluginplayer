@@ -127,29 +127,49 @@ static void drawViz(PP_Host* h, const PP_OsdApi* osd) {
     float W = 0, H = 0;
     if (!osd->size(h, &W, &H)) return;
 
+    /* 布局：优先放进底部黑边（不遮画面）。插件之间没有布局管理器，约定「底部
+     * 48px 是 osd_stats 进度条的区域」（那边的注释写了同样一句），频谱让开它；
+     * 黑边不够高或没有黑边时，退回原来画面内右下角的布局。 */
+    float bottomBand = 0.0f;
+    {
+        float bx = 0, by = 0, bw = 0, bh = 0;
+        if (osd->video_rect && osd->video_rect(h, &bx, &by, &bw, &bh))
+            bottomBand = H - (by + bh);
+    }
+
     const float panelW = W * 0.42f;
-    const float panelH = 110.0f;
-    const float px = W - panelW - 16.0f;
-    const float py = H - panelH - 60.0f;   /* 让开底部进度条 */
+    float panelH = 110.0f;
+    float px = W - panelW - 16.0f;
+    float py = H - panelH - 60.0f;             /* 回退布局：让开底部进度条 */
+    if (bottomBand >= 96.0f) {
+        panelH = bottomBand - 50.0f;           /* 贴进黑边，顶部留 2px、底部让开进度条 */
+        if (panelH > 110.0f) panelH = 110.0f;
+        py = H - bottomBand + 2.0f;
+    }
 
     osd->panel(h, px, py, panelW, panelH, PP_RGBA(0, 0, 0, 150), PP_RGBA(120, 255, 190, 190));
 
+    /* 内部布局按面板高度取比例：扁版（黑边里）和原尺寸共用同一套代码。 */
+    const float titleH = panelH * 0.24f;
+    const float plotY = py + titleH;
+    const float plotH = panelH - titleH - 6.0f;
+
     if (g_mode & 1) {
-        osd->bars(h, px + 10.0f, py + 24.0f, panelW - 20.0f, panelH - 40.0f,
-                  g_bars, BARS, PP_RGB(90, 230, 170));
+        osd->bars(h, px + 10.0f, plotY, panelW - 20.0f, plotH, g_bars, BARS,
+                  PP_RGB(90, 230, 170));
         /* 峰值保持线 */
         for (int i = 0; i < BARS; ++i) {
             float bw = (panelW - 20.0f) / BARS;
-            float y = py + 24.0f + (panelH - 40.0f) * (1.0f - g_peaks[i]);
+            float y = plotY + plotH * (1.0f - g_peaks[i]);
             osd->fill_rect(h, px + 10.0f + i * bw, y, bw > 2 ? bw - 1 : bw, 2.0f,
                            PP_RGB(255, 220, 120));
         }
     }
     if (g_mode & 2) {
         /* 用垂直线段近似波形 */
-        float base = py + 14.0f + (panelH - 30.0f) * 0.5f;
-        float amp = (panelH - 30.0f) * 0.45f;
-        float dx = (panelW - 20.0f) / 256.0f;
+        const float base = plotY + plotH * 0.5f;
+        const float amp = plotH * 0.45f;
+        const float dx = (panelW - 20.0f) / 256.0f;
         for (int i = 0; i < 256; ++i) {
             float v = g_wave[i];
             if (v > 1) v = 1;
@@ -161,7 +181,7 @@ static void drawViz(PP_Host* h, const PP_OsdApi* osd) {
 
     char tag[96];
     snprintf(tag, sizeof(tag), "FFT%d x%g  events %d", FFT_N, (double)g_gain, g_frames);
-    osd->text(h, px + 10.0f, py + 6.0f, tag, PP_RGB(190, 255, 220), 1.0f);
+    osd->text(h, px + 10.0f, py + titleH * 0.22f, tag, PP_RGB(190, 255, 220), 1.0f);
 }
 
 static int onOsdDraw(PP_EventCtx* ctx) {

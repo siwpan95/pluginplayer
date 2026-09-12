@@ -45,6 +45,7 @@ extern "C" {
  *    都必须同时递增 `PP_ABI_VERSION`，并**重新编译全部插件**。
  *    涉及的结构体：
  *      - PP_HostApi      （宿主填，插件读；已有 struct_size 字段）
+ *      - PP_OsdApi       （宿主填，插件读；追加字段同样必须递增版本并重编插件）
  *      - PP_Plugin       （插件填，宿主读）
  *      - PP_MediaInfo    （插件分配，宿主填充）
  *      - PP_PlaybackStats（插件分配，宿主填充）
@@ -64,8 +65,9 @@ extern "C" {
  *    这需要改掉**所有**调用点（插件里 7 处以上），收益有限、回归面不小，
  *    因此当前版本刻意不做 —— 记录在此，供将来决策。
  *
- * 5) 当前状态：`PP_ABI_VERSION = 1`，宿主与插件必须来自同一份头文件。
+ * 5) 当前状态：`PP_ABI_VERSION = 2`，宿主与插件必须来自同一份头文件。
  *    构建脚本 `build.py` 会一起编译宿主与全部插件，所以这在发布流程里是自然的。
+ *    v2 的变更：`PP_OsdApi` 追加 `video_rect`（OSD 避让画面黑边，见该字段注释）。
  * ===========================================================================
  */
 
@@ -73,7 +75,7 @@ extern "C" {
  * 版本与导出宏
  * =========================================================================== */
 
-#define PP_ABI_VERSION 1u
+#define PP_ABI_VERSION 2u
 
 /** 插件必须导出的入口符号名（见文件末 PP_PLUGIN_DECL）。 */
 #define PP_PLUGIN_ENTRY "pp_plugin_query"
@@ -286,6 +288,10 @@ typedef struct PP_OsdApi {
                   const float *values, int count, PP_Color color);
     /** OSD 画布尺寸（= 窗口客户区像素）。返回 0 表示当前不可绘制。 */
     int   (*size)(PP_Host *host, float *out_w, float *out_h);
+    /** 当前视频画面在画布里的矩形（letterbox 之后的位置与尺寸）。
+     *  插件据此把叠加层画进上下/左右黑边，避免遮挡画面；无画面时返回 0。 */
+    int   (*video_rect)(PP_Host *host, float *out_x, float *out_y,
+                        float *out_w, float *out_h);
 } PP_OsdApi;
 
 /* ===========================================================================

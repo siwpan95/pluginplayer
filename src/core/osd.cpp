@@ -14,10 +14,15 @@ Osd& Osd::instance() {
     return inst;
 }
 
-void Osd::begin(SDL_Renderer* r, int outW, int outH) {
+void Osd::begin(SDL_Renderer* r, int outW, int outH,
+                float videoX, float videoY, float videoW, float videoH) {
     r_ = r;
     outW_ = outW;
     outH_ = outH;
+    vx_ = videoX;
+    vy_ = videoY;
+    vw_ = videoW;
+    vh_ = videoH;
     if (r_) SDL_SetRenderDrawBlendMode(r_, SDL_BLENDMODE_BLEND);
 }
 
@@ -146,6 +151,15 @@ bool Osd::size(float* w, float* h) const {
     return true;
 }
 
+bool Osd::videoRect(float* x, float* y, float* w, float* h) const {
+    if (!r_ || vw_ <= 0.0f || vh_ <= 0.0f) return false;
+    if (x) *x = vx_;
+    if (y) *y = vy_;
+    if (w) *w = vw_;
+    if (h) *h = vh_;
+    return true;
+}
+
 /* ======================= C ABI 包装 ======================= */
 
 static void c_text(PP_Host*, float x, float y, const char* s, PP_Color c, float sc) {
@@ -176,11 +190,14 @@ static void c_bars(PP_Host*, float x, float y, float w, float h,
 static int c_size(PP_Host*, float* w, float* h) {
     return Osd::instance().size(w, h) ? 1 : 0;
 }
+static int c_videoRect(PP_Host*, float* x, float* y, float* w, float* h) {
+    return Osd::instance().videoRect(x, y, w, h) ? 1 : 0;
+}
 
 const PP_OsdApi* Osd::cApi() {
     static const PP_OsdApi api = {
         c_text, c_textWidth, c_lineHeight, c_panel,
-        c_fillRect, c_rect, c_line, c_bars, c_size,
+        c_fillRect, c_rect, c_line, c_bars, c_size, c_videoRect,
     };
     return &api;
 }

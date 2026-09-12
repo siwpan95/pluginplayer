@@ -13,7 +13,10 @@ class Osd {
 public:
     static Osd& instance();
 
-    void begin(SDL_Renderer* r, int outW, int outH);   /* 在渲染视频之后、Present 之前调用 */
+    /* 在渲染视频之后、Present 之前调用。video* 是当前画面矩形（letterbox 后的位置与
+     * 尺寸；无画面时传整窗，插件据此算出的"黑边"为零、自然退回画面内布局）。 */
+    void begin(SDL_Renderer* r, int outW, int outH,
+               float videoX, float videoY, float videoW, float videoH);
     void end();
 
     void  text(float x, float y, const char* s, PP_Color c, float scale);
@@ -25,6 +28,8 @@ public:
     void  line(float x1, float y1, float x2, float y2, PP_Color c, float thickness);
     void  bars(float x, float y, float w, float h, const float* values, int count, PP_Color c);
     bool  size(float* w, float* h) const;
+    /** 当前画面矩形（letterbox 后的 dst）；无可用画面时返回 false。 */
+    bool  videoRect(float* x, float* y, float* w, float* h) const;
 
     /** 暴露给插件的 C ABI 函数表（进程内唯一）。 */
     static const PP_OsdApi* cApi();
@@ -34,6 +39,7 @@ private:
     SDL_Renderer* r_ = nullptr;
     int outW_ = 0;
     int outH_ = 0;
+    float vx_ = 0.0f, vy_ = 0.0f, vw_ = 0.0f, vh_ = 0.0f;
 };
 
 } // namespace pp

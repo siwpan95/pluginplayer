@@ -30,6 +30,30 @@ static float line(PP_Host* h, const PP_OsdApi* osd, float x, float y,
     return y + osd->line_height(h, scale) + 4.0f;
 }
 
+/* 画面外的可用空间（黑边）。插件据此把叠加层放进黑边、不遮画面：
+ * 视频矩形由宿主渲染时算出（osd.video_rect），没有画面时四边都是 0，
+ * 各绘制函数自然退回原来的画面内布局。 */
+typedef struct Bands {
+    float top;      /* 画面顶端到窗口顶端的距离 */
+    float bottom;   /* 画面底端到窗口底端的距离 */
+    float left;
+    float right;
+} Bands;
+
+static Bands bandsOf(PP_Host* h, const PP_OsdApi* osd) {
+    Bands b{0.0f, 0.0f, 0.0f, 0.0f};
+    float w = 0, hh = 0;
+    if (!osd->size(h, &w, &hh)) return b;
+    float x = 0, y = 0, vw = 0, vh = 0;
+    if (osd->video_rect && osd->video_rect(h, &x, &y, &vw, &vh)) {
+        b.top = y;
+        b.bottom = hh - (y + vh);
+        b.left = x;
+        b.right = w - (x + vw);
+    }
+    return b;
+}
+
 static void drawTopLeft(PP_Host* h, const PP_OsdApi* osd) {
     PP_MediaInfo mi{};
     g_api->get_media_info(h, &mi);
@@ -57,8 +81,11 @@ static void drawTopLeft(PP_Host* h, const PP_OsdApi* osd) {
     float pw3 = osd->text_width(h, l3, 1.0f) + 24.0f;
     if (pw3 > pw) pw = pw3;
 
-    float y = 14.0f;
-    osd->panel(h, 14.0f, y, pw, 76.0f, PP_RGBA(0, 0, 0, 165), PP_RGBA(80, 200, 255, 200));
+    /* 面板高 76：顶部黑边放得下就贴进黑边，放不下退回画面内左上角。 */
+    const float kPanelH = 76.0f;
+    Bands b = bandsOf(h, osd);
+    float y = (b.top >= kPanelH + 6.0f) ? (b.top - kPanelH - 4.0f) : 14.0f;
+    osd->panel(h, 14.0f, y, pw, kPanelH, PP_RGBA(0, 0, 0, 165), PP_RGBA(80, 200, 255, 200));
     float ty = y + 8.0f;
     ty = line(h, osd, 26.0f, ty, l1, PP_RGB(255, 235, 150), 1.0f);
     ty = line(h, osd, 26.0f, ty, l2, PP_RGB(225, 225, 235), 1.0f);
@@ -80,20 +107,24 @@ static void drawTopRight(PP_Host* h, const PP_OsdApi* osd) {
 
     float w = 0, hh = 0;
     osd->size(h, &w, &hh);
-    float maxw = 0;
+    /* 两列 × 三行：顶部黑边通常只有几十像素高，纵向铺 6 行放不进去。 */
+    float colw[2] = {0.0f, 0.0f};
     for (int i = 0; i < 6; i++) {
         float tw = osd->text_width(h, l[i], 1.0f);
-        if (tw > maxw) maxw = tw;
+        if (tw > colw[i / 3]) colw[i / 3] = tw;
     }
-    float pw = maxw + 22.0f;
-    float px = w - pw - 14.0f;
-    float py = 14.0f;
-    osd->panel(h, px, py, pw, 6 * (osd->line_height(h, 1.0f) + 4.0f) + 10.0f,
-               PP_RGBA(0, 0, 0, 165), PP_RGBA(255, 160, 90, 200));
-    float ty = py + 6.0f;
+    const float lh = osd->line_height(h, 1.0f);
+    const float pw = colw[0] + colw[1] + 34.0f;
+    const float ph = 3 * (lh + 4.0f) + 10.0f;
+    const float px = w - pw - 14.0f;
+    Bands b = bandsOf(h, osd);
+    const float py = (b.top >= ph + 6.0f) ? (b.top - ph - 4.0f) : 14.0f;
+    osd->panel(h, px, py, pw, ph, PP_RGBA(0, 0, 0, 165), PP_RGBA(255, 160, 90, 200));
     for (int i = 0; i < 6; i++) {
         PP_Color c = (i == 3) ? PP_RGB(140, 255, 170) : PP_RGB(230, 230, 235);
-        ty = line(h, osd, px + 11.0f, ty, l[i], c, 1.0f);
+        float cx = px + 11.0f + (i / 3) * (colw[0] + 12.0f);
+        float cy = py + 6.0f + (i % 3) * (lh + 4.0f);
+        osd->text(h, cx, cy, l[i], c, 1.0f);
     }
 }
 
@@ -109,9 +140,12 @@ static void drawServiceInfo(PP_Host* h, const PP_OsdApi* osd) {
     snprintf(buf, sizeof(buf), "hotkeys svc: %s", txt);
     float tw = osd->text_width(h, buf, 1.0f);
     float px = (w - tw) * 0.5f - 10.0f;
-    osd->panel(h, px, 14.0f, tw + 20.0f, osd->line_height(h, 1.0f) + 12.0f,
+    const float ph = osd->line_height(h, 1.0f) + 12.0f;
+    Bands b = bandsOf(h, osd);
+    float py = (b.top >= ph + 4.0f) ? (b.top - ph - 3.0f) : 14.0f;
+    osd->panel(h, px, py, tw + 20.0f, ph,
                PP_RGBA(0, 0, 0, 160), PP_RGBA(180, 140, 255, 190));
-    osd->text(h, px + 10.0f, 20.0f, buf, PP_RGB(220, 200, 255), 1.0f);
+    osd->text(h, px + 10.0f, py + 6.0f, buf, PP_RGB(220, 200, 255), 1.0f);
 }
 
 static void drawBottomBar(PP_Host* h, const PP_OsdApi* osd) {
@@ -123,7 +157,10 @@ static void drawBottomBar(PP_Host* h, const PP_OsdApi* osd) {
 
     const float margin = 16.0f;
     const float barH = 8.0f;
-    float barY = hh - 34.0f;
+    /* 底部黑边放得下（信息行 + 进度条 ≈ 44px）就把整条挪进黑边；audio_viz 的
+     * 频谱面板按同一约定让开这 48px（见那边的注释）。 */
+    Bands b = bandsOf(h, osd);
+    float barY = (b.bottom >= 44.0f) ? (hh - 4.0f - barH) : (hh - 34.0f);
     float barW = w - margin * 2;
 
     /* 打印信息行 */

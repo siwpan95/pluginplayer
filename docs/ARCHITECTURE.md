@@ -159,7 +159,7 @@ int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
 
 ```
 → {"id":1,"method":"auth","params":{"token":"<64 位 hex>"}}        ← 必须是第一条
-← {"id":1,"ok":true,"result":{"authenticated":true,"abi":1}}
+← {"id":1,"ok":true,"result":{"authenticated":true,"abi":2}}
 
 → {"id":2,"method":"player.seek","params":{"seconds":12}}
 ← {"id":2,"ok":true,"result":{"position":12.0}}
@@ -197,6 +197,11 @@ int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
   否则 C++ 会把 `pp_plugin_query` 名字修饰掉，`GetProcAddress` 找不到。
 - **不跨 DLL 边界传所有权**：宿主返回的 `const char*`（配置值等）由宿主持有，
   插件只读不释放；插件要用帧数据必须走 `acquire_frame`（拿副本）或帧处理链（原地改）。
+- **OSD 避让画面**：渲染阶段把 letterbox 之后的画面矩形经 `PP_OsdApi.video_rect`
+  （ABI v2）暴露给插件；`osd_stats` / `audio_viz` 与宿主的暂停角标据此**优先画进
+  上下黑边**，黑边不足时退回原位。两个插件在底部的空间靠约定协调（底部 48px 归
+  进度条，见两边同名注释）。渲染几何一律按 `SDL_GetWindowSizeInPixels` 的**渲染像素**
+  计算 —— 用窗口逻辑尺寸在高 DPI 下会让右/下侧 OSD 被整块裁掉（实测过的缺陷）。
 
 ## 8b. 信任边界与写入白名单
 

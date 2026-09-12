@@ -31,7 +31,7 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 | Cordis / @cordisjs/plugin-loader | @cordisjs/plugin-loader 1.0.0-rc.6, cordis 4.0.0-rc.9 | MIT | https://www.npmjs.com/package/cordis |
 | MinGW-w64 GCC 运行时 | GCC 16.1.0 | GPL v3 + GCC Runtime Library Exception | https://www.mingw-w64.org/ |
 
-插件 ABI 版本：`PP_ABI_VERSION = 1`（`src/sdk/player_plugin.h`）。
+插件 ABI 版本：`PP_ABI_VERSION = 2`（`src/sdk/player_plugin.h`）。
 
 ### FFmpeg —— 随包文件与来源
 

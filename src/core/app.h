@@ -86,6 +86,7 @@ private:
     bool               quit_ = false;
     bool               fullscreen_ = false;
     bool               showHelp_ = false;
+    bool               osdHidden_ = false;   /* O 键：整体隐藏 OSD（插件叠加层 + 内置角标） */
     bool               completedFired_ = false;
     bool               allowNetworkInput_ = false;
     int64_t            lastUploadedIndex_ = -1;

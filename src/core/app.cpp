@@ -298,6 +298,12 @@ void App::handleKey(const SDL_Event& e) {
         case SDLK_H:
             showHelp_ = !showHelp_;
             break;
+        case SDLK_O:
+            /* 整体隐藏 OSD：黑边很窄时（例如全屏 16:9 播 16:9）叠加层仍会压住画面，
+             * 这一键给"零干扰观看"兜底。隐藏时连 osd.draw 都不广播，插件也省下绘制。 */
+            osdHidden_ = !osdHidden_;
+            PP_INFO("OSD 叠加层: %s（按 O 切换）", osdHidden_ ? "隐藏" : "显示");
+            break;
         case SDLK_LEFTBRACKET:
             player_.setSpeed(player_.speed() - 0.25);
             applyAudioParams();
@@ -380,34 +386,53 @@ void App::pumpAndUpload() {
 /* ======================= 渲染 ======================= */
 
 void App::renderFrame() {
-    if (!hidden_) SDL_GetWindowSize(win_, &winW_, &winH_);
-    else { winW_ = 960; winH_ = 540; }
+    /* 渲染几何一律按「渲染像素」计算：SDL_GetWindowSize 给的是窗口逻辑尺寸，在高
+     * DPI 下与渲染目标不一致（实测：逻辑 1280x900 的窗口，渲染目标约 1038x727），
+     * 会让画面位置算错、右侧与底部的 OSD 被整块裁掉。窗口隐藏（自检）时窗口仍在，
+     * 同一个调用同样拿到真实的目标尺寸。 */
+    int rw = 0, rh = 0;
+    SDL_GetWindowSizeInPixels(win_, &rw, &rh);
+    if (rw <= 0 || rh <= 0) {
+        if (!hidden_) SDL_GetWindowSize(win_, &rw, &rh);
+        if (rw <= 0 || rh <= 0) { rw = 960; rh = 540; }
+    }
+    winW_ = rw;
+    winH_ = rh;
 
     SDL_SetRenderDrawColor(ren_, 16, 16, 20, 255);
     SDL_RenderClear(ren_);
 
+    /* 画面矩形（letterbox 后的 dst）：OSD 插件据此避开画面、把叠加层画进黑边。
+     * 无画面时整窗视为画面 —— 插件算出的黑边为零，自然退回画面内布局。 */
+    float vx = 0.0f, vy = 0.0f, vw = (float)rw, vh = (float)rh;
     if (tex_) {
         double srcAspect = (double)texW_ / (double)texH_;
         /* 用窗口比例和视频比例求「含黑边」的显示矩形 */
-        double dstAspect = (double)winW_ / (double)winH_;
+        double dstAspect = (double)rw / (double)rh;
         float w, h;
         if (srcAspect > dstAspect) {
-            w = (float)winW_;
-            h = (float)(winW_ / srcAspect);
+            w = (float)rw;
+            h = (float)(rw / srcAspect);
         } else {
-            h = (float)winH_;
-            w = (float)(winH_ * srcAspect);
+            h = (float)rh;
+            w = (float)(rh * srcAspect);
         }
-        SDL_FRect dst{(float)((winW_ - w) * 0.5), (float)((winH_ - h) * 0.5), w, h};
+        SDL_FRect dst{(float)((rw - w) * 0.5), (float)((rh - h) * 0.5), w, h};
         SDL_RenderTexture(ren_, tex_, nullptr, &dst);
+        vx = dst.x;
+        vy = dst.y;
+        vw = dst.w;
+        vh = dst.h;
     }
 
-    /* OSD 阶段：把绘制权交给插件 */
-    Osd& osd = Osd::instance();
-    osd.begin(ren_, winW_, winH_);
-    host_.emitOsdDraw();
-    renderBuiltinOverlay();
-    osd.end();
+    /* OSD 阶段：把绘制权交给插件（O 键可整体隐藏，连 osd.draw 都不广播） */
+    if (!osdHidden_) {
+        Osd& osd = Osd::instance();
+        osd.begin(ren_, rw, rh, vx, vy, vw, vh);
+        host_.emitOsdDraw();
+        renderBuiltinOverlay();
+        osd.end();
+    }
 }
 
 void App::renderBuiltinOverlay() {
@@ -424,9 +449,13 @@ void App::renderBuiltinOverlay() {
         return;
     }
 
-    /* 暂停时给个角标，避免"看起来卡住" */
+    /* 暂停时给个角标，避免"看起来卡住"（优先放进顶部黑边，不压画面） */
     if (player_.paused()) {
-        osd.text(16, 14, "|| PAUSED", PP_RGB(255, 210, 120), 1.5f);
+        float px = 0, py = 0, pw = 0, ph = 0;
+        float y = 14.0f;
+        const float lh = osd.lineHeight(1.5f);
+        if (osd.videoRect(&px, &py, &pw, &ph) && py >= lh + 8.0f) y = py - lh - 6.0f;
+        osd.text(16, y, "|| PAUSED", PP_RGB(255, 210, 120), 1.5f);
     }
 
     if (showHelp_) {
@@ -442,6 +471,7 @@ void App::renderBuiltinOverlay() {
             "  S            执行 snapshot 命令（插件提供）",
             "  TAB          列出全部已注册命令",
             "  P            输出插件加载报告",
+            "  O            显示 / 隐藏 OSD 叠加层",
             "  H            显示 / 隐藏本帮助",
             "  Q / ESC      退出（全屏时先退出全屏）",
         };
@@ -716,11 +746,13 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
 
     /* --- 渲染一次并抓屏（验证渲染管线可用） ---
      * 抓屏产物只是自检证据，不是运行时功能。对超大帧主动跳过落盘，
-     * 否则会写出 GB 级 BMP（历史实测 --size 20000 写出过 1.6 GB）。 */
+     * 否则会写出 GB 级 BMP（历史实测 --size 20000 写出过 1.6 GB）。
+     * 读回必须发生在 Present 之前：Present 之后后备缓冲内容未定义，
+     * 历史实测这张"证据图"一直是全黑 —— 等于没有证据价值。 */
     pumpAndUpload();
     renderFrame();
-    SDL_RenderPresent(ren_);
     SDL_Surface* surf = SDL_RenderReadPixels(ren_, nullptr);
+    SDL_RenderPresent(ren_);
     bool captured = (surf != nullptr);
     bool shot = false;
     std::string capDetail;

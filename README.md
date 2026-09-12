@@ -68,7 +68,8 @@ cd host-js && npm install && node src\index.mjs --port 7911
 
 播放中快捷键：`SPACE` 播放/暂停、`←/→` ±5s（Shift ±30s）、`↑/↓` 音量、
 `M` 静音、`0-9` 跳百分比、`[ / ]` 变速、`F` 全屏、`S` 截图、
-`H` 帮助、`TAB` 列命令、`P` 插件报告、`Q`/`ESC` 退出（全屏时先退出全屏）。
+`O` 显示/隐藏 OSD 叠加层、`H` 帮助、`TAB` 列命令、`P` 插件报告、
+`Q`/`ESC` 退出（全屏时先退出全屏）。
 
 ### 常用选项
 
@@ -632,7 +633,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] rpc-methods-align    实现 19 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
 [PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应
 [PASS] cli-commands-align   25 个命令，README 与 docs/CLI.md 的表与实现一致
-[PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 1；Cordis 4.0.0-rc.9
+[PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 2；Cordis 4.0.0-rc.9
 [PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
 [PASS] doc-links            27 条相对链接全部可解析
 [PASS] docs-index           4 份文档全部收录
@@ -714,6 +715,15 @@ C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个�
   Windows 的 `main(argv)` 由 CRT 从 ANSI(本机 GBK) 命令行转换而来，中文路径进到程序里
   已经不是 UTF-8 字节，而 FFmpeg 的接口期望 UTF-8。现在程序入口用
   `CommandLineToArgvW(GetCommandLineW())` 重取 Unicode 参数、转 UTF-8 后重建 `argv`。
+- **OSD 曾整块压在画面上**（用户截图反馈）：`osd.draw` 只知道窗口尺寸，插件没法避开
+  画面。现在宿主把 letterbox 后的画面矩形经 `PP_OsdApi.video_rect`（**ABI v2**）暴露
+  出来，`osd_stats` / `audio_viz` / 宿主暂停角标都会**优先画进上下黑边**，黑边不足才
+  退回原位。顺带修了两个渲染缺陷：几何计算改用 `SDL_GetWindowSizeInPixels`（原先用
+  窗口逻辑尺寸，高 DPI 下右/下侧 OSD 会被整块裁掉）；自检抓屏改到 `Present` **之前**
+  读回（原先那张"证据图"一直是全黑）。实测效果（1280x900 窗口 + 16:9 视频）：画面精确
+  占 y 90~809，顶部三块 OSD 在 0~86、底部频谱/信息行/进度条在 810~900，**画面零遮挡**。
+  黑边放不下时（例如全屏 16:9 播 16:9）仍会退回画面内，此时可按 **`O`** 一键整体隐藏
+  OSD —— 隐藏时连 `osd.draw` 都不广播，插件连绘制都省了。
 
 ```bat
 chcp 936                            :: 先把控制台钉到 GBK（复现条件）
