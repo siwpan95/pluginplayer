@@ -1,6 +1,7 @@
 /* osd.cpp */
 #include "osd.h"
 #include "util.h"
+#include "font.h"
 
 #include <algorithm>
 #include <cmath>
@@ -54,11 +55,28 @@ static std::string sanitize(const char* s) {
     return o;
 }
 
+/* OSD 的 scale 语义是"调试点阵字(8px)的放大倍数"，插件已经按这个口径在传。
+ * 真字体沿用同一口径换算成逻辑像素，这样换字体不用改任何插件调用。 */
+static int pxForScale(float scale) {
+    if (scale < 0.5f) scale = 0.5f;
+    int px = (int)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale + 0.5f);
+    if (px < 6) px = 6;
+    return px;
+}
+
 void Osd::text(float x, float y, const char* s, PP_Color c, float scale) {
     if (!r_ || !s || !*s) return;
+    if (scale < 0.5f) scale = 0.5f;
+
+    Font& f = Font::instance();
+    if (f.loaded()) {
+        f.drawText(r_, x, y, s, c, pxForScale(scale));
+        return;
+    }
+    /* 回退：没有字体文件（或字体不是 TrueType 轮廓）时仍要有界面，
+     * 只是非 ASCII 会被降级成 '?' —— 这是"可读"而不是"可用"，会打 WARN 提醒。 */
     std::string t = sanitize(s);
     if (t.empty()) return;
-    if (scale < 0.5f) scale = 0.5f;
     setColor(r_, c);
     SDL_SetRenderScale(r_, scale, scale);
     SDL_RenderDebugText(r_, x / scale, y / scale, t.c_str());
@@ -67,10 +85,17 @@ void Osd::text(float x, float y, const char* s, PP_Color c, float scale) {
 
 float Osd::textWidth(const char* s, float scale) const {
     if (!s) return 0.0f;
-    return (float)strlen(s) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale;
+    if (scale < 0.5f) scale = 0.5f;
+    const Font& f = Font::instance();
+    if (f.loaded()) return f.measure(s, pxForScale(scale));
+    /* 回退口径仍按"显示宽度单位"算（全宽记 2），比 strlen 少一点错 */
+    return (float)utf8DisplayWidth(s) * (SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE / 2.0f) * scale;
 }
 
 float Osd::lineHeight(float scale) const {
+    if (scale < 0.5f) scale = 0.5f;
+    const Font& f = Font::instance();
+    if (f.loaded()) return f.lineHeight(pxForScale(scale));
     return (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale;
 }
 

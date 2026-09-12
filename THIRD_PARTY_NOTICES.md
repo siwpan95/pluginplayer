@@ -87,12 +87,13 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 
 | 文件 |
 |---|
+| `assets/fonts/ZCOOLKuaiLe-Regular.ttf` |
 | `config/pluginplayer.ini` |
 | `pluginplayer.exe` |
 
 ### `dist/` 载荷
 
-发布载荷共 **17 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
+发布载荷共 **18 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
 
 ## 开发期使用、但不随发布物分发
 

@@ -50,7 +50,7 @@ F:\Python314\python.exe build.py
 F:\Python314\python.exe build.py --smoke
 
 :: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
-::     实测产物 17 个文件 / 127 MB（不带 --release 时 dist/ 会累积日志与自检证据）
+::     实测产物 18 个文件 / 129 MB（不带 --release 时 dist/ 会累积日志与自检证据）
 F:\Python314\python.exe build.py --release
 
 :: 3) 播放（把视频拖到 run.bat 上，或：）
@@ -647,8 +647,8 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] plugin-command-count 注册 15 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
 [PASS] native-plugin-set    5 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
 [PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
-[PASS] release-payload      17 个文件 / 127.0 MB，与 README 的 17 / 127 MB 一致
-[PASS] portable-modules     17 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
+[PASS] release-payload      18 个文件 / 128.6 MB，与 README 的 18 / 129 MB 一致
+[PASS] portable-modules     20 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
 [PASS] no-credentials       82 个文本文件已扫描，未发现硬编码凭据
 [PASS] arg-bounds-align     13 项边界与 C++ 源码一致
 [PASS] rpc-methods-align    实现 19 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
@@ -999,12 +999,47 @@ HDR / 广色域素材的传输函数与色域映射属于 P2-3，不在本轮范
 **实测（4K，seek 到 5.0 s）**：seek 响应 position 恰为 5.000（冻结在目标）；
 seek 后 5 s `dropped +0`（修复前 24）、显示 +115 帧；`--selftest` 的 `seek` 步骤仍 PASS。
 
+### 20. 真字体 OSD：中文终于不是 `?` 了（2026-09-13，P1-a）
+
+**做法**：`Osd::text` 从 SDL 调试点阵字（`SDL_RenderDebugText`，8×8，只能打 ASCII）
+换成 **stb_truetype v1.26** 解析 TTF、烤字形图集后用 `SDL_RenderTexture` 逐字绘制。
+随包字体 `assets/fonts/ZCOOLKuaiLe-Regular.ttf`（站酷快乐体，**TrueType `glyf` 轮廓**）。
+
+三条实现要点（都是踩过或规避掉的坑）：
+
+1. **stb_truetype 只支持 TrueType `glyf`，不支持 OTF/CFF。** 选字体必须给 `.ttf`；
+   给它 `.otf` 会在 `stbtt_InitFont` 处失败（此时**回退**到调试点阵字，不是崩）。
+2. **纯逻辑放 `util.cpp`**：UTF-8 解码、东亚全宽判定、显示宽度 —— 这样它们能进
+   Linux CI 的单测（`portable-modules` 门禁只管 util/config/eventbus/registry，
+   `font.cpp`/`osd.cpp` 不在其中，可以用 Windows API 与 SDL）。
+3. **字体缺失不能变成"没界面"**：加载失败时保留原调试点阵字 + `sanitize()` 路径。
+   可用 `PP_FONT=<路径>` 覆盖默认字体。
+
+**实测**
+
+- 自检 **12/12**（新增 `font_render` 步骤），`--selftest` 里中文字形逐像素断言通过。
+- **断言能判失败（已注入验证）**：把渲染路径强制退回调试字体后，
+  中文"播"与对照的 `???` 逐像素差异**恰好 0**，步骤判 **FAIL**（rc=1，11/12）；
+  正常构建下差异 **789 像素** → PASS。**差异为 0 正是"中文被降级成 `?`"的特征。**
+- 中途抓到两个真 bug：① 截断的 UTF-8 序列没把码点重置为 U+FFFD（返回了首字节的
+  部分值 0x06）；② 抓屏在 `Present` **之后**读，拿到的是上一帧视频画面 ——
+  必须 Present 前 `ReadPixels`，否则断言形同虚设（实测两块区域都"整片亮"）。
+- 单测 **97/97**（新增 `utf8.*` 8 项：多字节解码、非法序列前进、超长/代理区拒绝、全宽判定）。
+
+**合规如实说明**：随包字体 zip 内**没有**随附 LICENSE，字体 name 表也没有
+nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的公开免费商用声明与来源目录，
+**未取得可逐字引用的许可原文**（已写进 `THIRD_PARTY_NOTICES.md` 的"证据"栏）。
+若要最强合规证据，应换成 Noto Sans SC / 思源黑体（SIL OFL 1.1，raw 上带完整 LICENSE，约 8 MB）。
+
+另注：**微软雅黑（`msyh.ttc`）版权属方正，不可随包分发** —— 这是字体方案的第一条红线。
+
 ### 19. 环境变量一览（新增）
 
 | 变量 | 作用 |
 |---|---|
 | `PP_NO_HWDEC=1` | 关闭硬件解码，强制软解（排障 / A/B 用） |
 | `PP_NO_NV12=1` | 强制 RGBA 纹理上传路径（**同一二进制**上做 NV12/RGBA A/B 用） |
+| `PP_FONT=<路径>` | 指定 OSD 字体（须为 TrueType `glyf` 轮廓）；未设时用随包字体 |
 
 （既有：`PP_WEB_REMOTE`、`PP_RPC_TOKEN`、`PP_PYTHON`、`PP_CLI_NO_INSTALL`、`PP_ROOT`。）
 
@@ -1079,7 +1114,7 @@ seek 后 5 s `dropped +0`（修复前 24）、显示 +115 帧；`--selftest` 的
   不验证"解出来的像素对不对"）—— 那需要参考帧比对，目前没做。内核与插件的回归仍靠
   `--selftest` / `--smoke` / `--apitest` 三个入口，是"最小入口"而不是完整测试网。
 - **命令行接口不随 `dist/` 发布**：`tools/pp_cli.py` 是仓库侧的运维工具，
-  靠 `install-cli` 装进 PATH 目录。`dist/` 保持"17 个文件 / 127 MB"的干净载荷，
+  靠 `install-cli` 装进 PATH 目录。`dist/` 保持"18 个文件 / 128.6 MB"的干净载荷，
   口径与 `build.py --release` 一致（把 CLI 塞进去会让这个口径失真）。
   `pluginplayer.cmd` / `pp.cmd` 是生成物但**纳入版本控制** ——
   这样 clone 下来不带 PATH 也能用，且行尾契约由 `.gitattributes` 钉住。

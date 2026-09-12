@@ -89,6 +89,36 @@ LICENSES = {
             "any purpose\" + 三条限制）—— 即 zlib 许可的标准措辞",
         ],
     },
+    "stb_truetype": {
+        "name": "stb_truetype.h（stb 单文件库）",
+        "license": "Public Domain / Unlicense（与 MIT 二选一，本项目按 Public Domain 采用）",
+        "license_url": "https://github.com/nothings/stb/blob/master/stb_truetype.h",
+        "upstream": "https://github.com/nothings/stb",
+        "build": "v1.26 单头文件，随仓库 vendor/stb/stb_truetype.h（199,192 字节，实测 Content-Length）",
+        "evidence": [
+            "文件头原文：`// stb_truetype.h - v1.26 - public domain`",
+            "同一文件另给出 MIT 与 Public Domain 两种授权供选择（原文 "
+            "\"This software is available under 2 licenses -- choose whichever you prefer\"）",
+            "核实命令：curl -sI https://raw.githubusercontent.com/nothings/stb/master/stb_truetype.h "
+            "| findstr Content-Length（本机实测 199192）",
+        ],
+    },
+    "zcool_kuaile": {
+        "name": "站酷快乐体 2016 修订版（ZCOOL KuaiLe / OSD 随包字体）",
+        "license": "免费商用（字体发布方「站酷 ZCOOL」声明）；**非** SIL OFL，也无随附 LICENSE 文本",
+        "license_url": "https://www.zcool.com.cn/",
+        "upstream": "https://www.zcool.com.cn/",
+        "build": "assets/fonts/ZCOOLKuaiLe-Regular.ttf（1,639,036 字节，TrueType 'glyf' 轮廓）",
+        "evidence": [
+            "来源：本机字体资产库 G:\\assets\\fonts\\etc\\ZhanKuKuaiLeTi2016XiuDingBan.zip"
+            "（用户确认该目录字体均为免费可商用）",
+            "**如实说明（证据强度不足，不要当成已核实）**：zip 内**没有**随附 LICENSE 文本，"
+            "字体 name 表也没有 nameID 13/14（许可信息字段）—— 目前只能依据发布方公开声明"
+            "与来源目录判断，未取得可逐字引用的许可原文",
+            "若将来要求最强合规证据：换成 Noto Sans SC / 思源黑体（SIL OFL 1.1，"
+            "raw 上带完整 LICENSE，体积 ~8 MB），release-payload 数字需再同步",
+        ],
+    },
     "cordis": {
         "name": "Cordis 与 @cordisjs/plugin-loader",
         "license": "MIT",

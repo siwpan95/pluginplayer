@@ -1,6 +1,7 @@
 /* app.cpp — 应用层实现 */
 #include "app.h"
 #include "osd.h"
+#include "font.h"
 #include "util.h"
 
 #include <algorithm>
@@ -85,6 +86,20 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
         rpc_.broadcastEvent(t, j);
     });
 
+    /* P1-a 真字体：有字体就走真字形，没有就回退 SDL 调试点阵字（界面仍然可用，
+     * 只是非 ASCII 会显示成 '?'）。加载失败不算致命 —— 播放器照样能播。 */
+    {
+        std::string fp;
+        const char* envFont = getenv("PP_FONT");
+        if (envFont && *envFont) fp = envFont;
+        else fp = pathJoin(appDir, "assets/fonts/ZCOOLKuaiLe-Regular.ttf");
+        if (!Font::instance().load(fp)) {
+            PP_WARN("真字体未启用（%s），OSD 退回调试点阵字：中文会显示成 '?'。"
+                    "可用 PP_FONT=<字体.ttf> 指定（必须是 TrueType 'glyf' 轮廓，OTF/CFF 不支持）",
+                    fp.c_str());
+        }
+    }
+
     return true;
 }
 
@@ -96,6 +111,7 @@ void App::shutdown() {
     player_.close();
     host_.shutdown();
     if (tex_) { SDL_DestroyTexture(tex_); tex_ = nullptr; }
+    Font::instance().shutdown();          /* 必须在销毁渲染器之前释放字形图集纹理 */
     if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
     if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
     SDL_Quit();
@@ -991,6 +1007,62 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     bool evidenceOk = captured && uploaded && clearRatio >= 0.0 &&
                       clearRatio < kMaxClearRatioInVideo;
     addStep("render_and_capture", evidenceOk, capDetail);
+
+    /* --- P1-a 真字体：中文字形渲染（像素级断言） ---
+     * 判据必须能证伪，不能只看"字体加载成功"：
+     * 把同一个汉字和一个 '?' 用**同一条 OSD 路径**、同样的字号画在相邻位置，
+     * 抓屏后逐像素比较两块区域。若中文被降级成 '?'（字体没生效/不是 TrueType 轮廓），
+     * 两块会**逐像素相同** → 断言失败。这正是要抓的失效模式。
+     * 字体不可用时 SKIP（跳过 ≠ 通过，与既有口径一致）。 */
+    {
+        Font& f = Font::instance();
+        if (!f.loaded()) {
+            skipStep("font_render", "真字体未加载，跳过中文字形校验（未验证，UI 已回退调试点阵字）");
+        } else {
+            const int bx = 60, by = 60, side = 40;
+            const int qx = 160;
+            SDL_SetRenderDrawColor(ren_, 16, 16, 20, 255);
+            SDL_RenderClear(ren_);
+            {
+                Osd& osd = Osd::instance();
+                osd.begin(ren_, winW_, winH_, 0, 0, (float)winW_, (float)winH_);
+                /* 对照画**三个** '?'：汉字"播"的 UTF-8 是 3 字节，一旦被调试字体
+                 * 逐字节降级，画出来的正是 3 个 '?' —— 只有对照数量一致，
+                 * "降级"才会让两块区域逐像素相同，断言才抓得住。
+                 * （早期版本对照只画 1 个 '?'，于是降级后仍有 48 像素差异而误判 PASS。） */
+                osd.text((float)bx, (float)by, "\xE6\x92\xAD", 0xFFFFFFFFu, 4.0f);  /* 播 */
+                osd.text((float)qx, (float)by, "???", 0xFFFFFFFFu, 4.0f);
+                osd.end();
+            }
+            /* **不要 Present** —— Present 之后 backbuffer 内容未定义，读到的会是
+             * 上一帧的视频画面（实测：两块区域都变成"整片亮"，断言形同虚设）。
+             * 直接 ReadPixels 读当前渲染目标，拿到的才是刚画的字形。 */
+            SDL_Surface* s = SDL_RenderReadPixels(ren_, nullptr);
+            if (!s) {
+                addStep("font_render", false, format("抓屏失败: %s", SDL_GetError()));
+            } else {
+                int diff = 0, inkCn = 0, inkQ = 0;
+                for (int y = by; y < by + side && y < s->h; y++) {
+                    for (int x = bx; x < bx + side && x < s->w; x++) {
+                        const uint8_t* a = (const uint8_t*)s->pixels + y * s->pitch + x * 4;
+                        const uint8_t* b = (const uint8_t*)s->pixels + y * s->pitch + (x + qx - bx) * 4;
+                        if (a[0] != b[0] || a[1] != b[1] || a[2] != b[2]) diff++;
+                        if (a[0] > 60 || a[1] > 60 || a[2] > 60) inkCn++;   /* 非背景的"墨迹" */
+                        if (b[0] > 60 || b[1] > 60 || b[2] > 60) inkQ++;
+                    }
+                }
+                SDL_DestroySurface(s);
+                /* 两个条件缺一不可：
+                 *   ① 中文区真的有墨迹（否则是画了个空）；
+                 *   ② 与 '?' 的形状不同（否则说明中文被降级了）。 */
+                bool ok = (inkCn >= 30) && (inkQ >= 5) && (diff >= 30);
+                addStep("font_render", ok,
+                        format("中文'播'与'?'逐像素差异 %d 个像素（阈值 %d）；"
+                               "中文区墨迹 %d px、'?' 区墨迹 %d px —— 差异为 0 即说明中文被降级成 '?'",
+                               diff, 30, inkCn, inkQ));
+            }
+        }
+    }
 
     /* --- 卸载/重载往返测试（验证注册撤销干净） --- */
     int beforeSubs = host_.bus().totalSubscriptions();

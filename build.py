@@ -37,6 +37,7 @@ CORE_SOURCES = [
     "core/main.cpp", "core/app.cpp", "core/host.cpp", "core/player.cpp",
     "core/pluginhost.cpp", "core/osd.cpp", "core/eventbus.cpp",
     "core/registry.cpp", "core/config.cpp", "core/util.cpp", "core/control.cpp",
+    "core/font.cpp",           # P1-a 真字体渲染（stb_truetype）
 ]
 
 # 插件目录名 -> 输出 DLL 名
@@ -68,6 +69,7 @@ UNIT_TEST_SOURCES = [
     "tests/unit/test_eventbus.cpp",
     "tests/unit/test_registry.cpp",
     "tests/unit/test_config.cpp",
+    "tests/unit/test_utf8.cpp",  # P1-a UTF-8 解码与全宽判定
 ]
 # 单元测试不需要 SDL3 / FFmpeg 的头文件，但 util.cpp 用了 bcrypt 做 SHA-256
 LDFLAGS_UNIT = ["-lbcrypt"] + ["-static-libgcc", "-static-libstdc++",
@@ -87,6 +89,7 @@ CXXFLAGS_DEBUG = [
 INCLUDES = [
     "-Isrc/sdk", "-Isrc/core",
     "-Ivendor/sdl3/include", "-Ivendor/ffmpeg/include",
+    "-Ivendor/stb",            # stb_truetype.h（P1-a 真字体）
 ]
 
 # 只静态链接运行时库（libgcc / libstdc++ / libwinpthread），
@@ -301,6 +304,26 @@ def package():
         if cp(os.path.join(BUILD, pl + ".dll"), os.path.join(DIST, "plugins")):
             p += 1
     print(f"[OK] 复制运行时 DLL {n} 个，插件 {p} 个")
+
+    # 随包字体（P1-a 真字体）。assets/ 整体复制 —— 目录里现在是
+    # assets/fonts/*.ttf；以后放别的静态资源也不用改这里。
+    # 字体是**发布载荷的一部分**：release-payload 门禁会把 dist/ 实际文件数与
+    # README 声明比对，随包字体变了要同步改 README。
+    assets_src = os.path.join(ROOT, "assets")
+    a_n = 0
+    if os.path.isdir(assets_src):
+        for dirpath, _dirnames, filenames in os.walk(assets_src):
+            rel = os.path.relpath(dirpath, assets_src)
+            dst_dir = os.path.join(DIST, "assets") if rel == "." else os.path.join(DIST, "assets", rel)
+            os.makedirs(dst_dir, exist_ok=True)
+            for fn in filenames:
+                if fn == ".gitkeep":
+                    continue
+                if os.path.isfile(os.path.join(dirpath, fn)):
+                    shutil.copy2(os.path.join(dirpath, fn), os.path.join(dst_dir, fn))
+                    a_n += 1
+    if a_n:
+        print(f"[OK] 复制 assets {a_n} 个文件（含随包字体）")
     write_plugin_manifest()
 
     # MinGW 运行时 DLL（libstdc++/libgcc 已静态链接，但 libwinpthread 仍需随行）

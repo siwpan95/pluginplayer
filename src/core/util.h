@@ -164,4 +164,24 @@ double rgbaColorRatioInRect(const uint8_t* rgba, int pitch, int w, int h,
                             int x, int y, int rw, int rh,
                             uint8_t r, uint8_t g, uint8_t b);
 
+/* ---- UTF-8 解码与东亚全宽判定（P1-a 真字体 OSD 的纯逻辑层）----
+ *
+ * 放在 util 里而不是 font 里，原因和色彩选择函数一样：**可移植、能在 Linux CI 上单测**。
+ * font.cpp 依赖 SDL 与 stb_truetype，进不了 portable 子集；而"一个 UTF-8 序列解出什么
+ * 码点""这个码点是不是全宽"是纯查表逻辑，错了就是整屏错位，必须有单测兜底。
+ *
+ * 为什么需要全宽判定：文本宽度要按字形 advance 累加，而 CJK 标点/假名/全角字母在
+ * 半宽字体里也是双宽。只按"码点 > 0x2E80 就算双宽"会漏掉全角 ASCII（U+FF01..FF60）。 */
+
+/** 解出一个 UTF-8 序列。非法序列按 U+FFFD 处理，并返回该序列实际消耗的字节数
+ *  （保证调用方能继续往后走，不会死循环）。返回 0 表示已到串尾。
+ *  out 可为 nullptr（只想知道长度）。 */
+int utf8Decode(const char* s, size_t len, uint32_t* out);
+
+/** 该码点是否应占"双宽"（东亚宽 W / 全宽 F）。用于文本宽度与换行的粗排。 */
+bool isWideCodepoint(uint32_t cp);
+
+/** UTF-8 串的"显示宽度单位数"：全宽记 2，其余记 1。用于不依赖字体的宽度估算。 */
+int utf8DisplayWidth(const char* s);
+
 } // namespace pp

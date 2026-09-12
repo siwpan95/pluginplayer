@@ -810,4 +810,79 @@ int sdlColorspaceFor(const YuvColorChoice& c, int* fellBack) {
     }
 }
 
+/* ---------------- UTF-8 纯逻辑（P1-a） ---------------- */
+
+int utf8Decode(const char* s, size_t len, uint32_t* out) {
+    if (!s || len == 0) return 0;
+    const unsigned char* p = (const unsigned char*)s;
+    unsigned char c = p[0];
+    uint32_t cp = 0xFFFD;          /* 非法序列一律替换字符 */
+    int need = 0;
+
+    if (c < 0x80)        { cp = c;        need = 0; }
+    else if (c >= 0xC2 && c <= 0xDF) { cp = c & 0x1Fu; need = 1; }
+    else if (c >= 0xE0 && c <= 0xEF) { cp = c & 0x0Fu; need = 2; }
+    else if (c >= 0xF0 && c <= 0xF4) { cp = c & 0x07u; need = 3; }
+    else {
+        /* 0x80..0xC1（多余续字节/超长编码）与 0xF5..0xFF：吃 1 字节，给替换字符 */
+        if (out) *out = cp;
+        return 1;
+    }
+    if ((size_t)need + 1 > len) {
+        /* 截断的序列：必须给替换字符。
+         * 注意 cp 此时已被写成首字节的有效位（如 0xE6 → 0x06），
+         * 直接返回它等于"把半个码点当成一个码点"，会让后面的宽度与查字形全错。 */
+        if (out) *out = 0xFFFD;
+        return 1;
+    }
+    for (int i = 1; i <= need; i++) {
+        unsigned char cc = p[i];
+        if ((cc & 0xC0) != 0x80) {  /* 续字节不合规 */
+            if (out) *out = 0xFFFD;
+            return i;               /* 只吃掉已确认的前缀 */
+        }
+        cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    /* 超长编码与代理区（U+D800..DFFF）都判非法 —— 否则会被当成有效码点送进字体 */
+    if ((need == 1 && cp < 0x80) ||
+        (need == 2 && cp < 0x800) ||
+        (need == 3 && cp < 0x10000) ||
+        (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+        cp = 0xFFFD;
+    }
+    if (out) *out = cp;
+    return need + 1;
+}
+
+bool isWideCodepoint(uint32_t cp) {
+    /* 只判"东亚宽 W / 全宽 F"里本项目真正会遇到的区间，够用且不误伤：
+     *  - CJK 部首/汉字/兼容/扩展 A（其余扩展区罕见，也按宽处理无妨）
+     *  - 平假名/片假名、韩文音节、全角 ASCII 与全角标点
+     *  - 个别区间（如 U+3000 表意空格、U+2010 附近）单独列出 */
+    if (cp >= 0x1100 && cp <= 0x115F) return true;   /* 韩文字母 */
+    if (cp >= 0x2E80 && cp <= 0xA4CF) return true;   /* CJK 部首…彝文 */
+    if (cp >= 0xAC00 && cp <= 0xD7A3) return true;   /* 韩文音节 */
+    if (cp >= 0xF900 && cp <= 0xFAFF) return true;   /* CJK 兼容表意 */
+    if (cp >= 0xFE30 && cp <= 0xFE4F) return true;   /* CJK 兼容形式 */
+    if (cp >= 0xFF01 && cp <= 0xFF60) return true;   /* 全角 ASCII/标点 */
+    if (cp >= 0xFFE0 && cp <= 0xFFE6) return true;   /* 全角符号 */
+    if (cp >= 0x20000 && cp <= 0x3FFFD) return true; /* CJK 扩展 B.. */
+    return false;
+}
+
+int utf8DisplayWidth(const char* s) {
+    if (!s) return 0;
+    size_t len = strlen(s);
+    int w = 0;
+    size_t i = 0;
+    while (i < len) {
+        uint32_t cp = 0;
+        int n = utf8Decode(s + i, len - i, &cp);
+        if (n <= 0) break;
+        i += (size_t)n;
+        w += isWideCodepoint(cp) ? 2 : 1;
+    }
+    return w;
+}
+
 } // namespace pp
