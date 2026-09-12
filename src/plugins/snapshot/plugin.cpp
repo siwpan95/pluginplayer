@@ -136,6 +136,23 @@ static int cmdSnapshotGray(PP_Host* h, int argc, const char** argv, void* user) 
     return -1;
 }
 
+/* 标记框的帧处理器**按需挂载**（2026-09-12）：`stamp off`（默认）时不占帧链。
+ * 理由与 video_effects 的 syncChain 相同 —— 链非空会迫使渲染层走 CPU RGBA 路线
+ * （插件的契约是可写 RGBA 像素），而默认状态下这条链本该是空的。 */
+static void syncStamp(PP_Host* h) {
+    if (g_stampOn && !g_stampProc) {
+        /* 优先级 200：排在效果类插件之后，保证标记框画在最终画面上 */
+        g_stampProc = g_api->set_frame_processor(h, &stampProcessor, nullptr, 200);
+        if (g_stampProc)
+            g_api->log(h, PP_LOG_INFO, "已挂标记框帧处理器 (id=%d)", g_stampProc);
+    } else if (!g_stampOn && g_stampProc) {
+        const int old = g_stampProc;
+        g_api->remove_frame_processor(h, old);
+        g_stampProc = 0;
+        g_api->log(h, PP_LOG_INFO, "标记框已关，撤销帧处理器 (id=%d)", old);
+    }
+}
+
 static int cmdStamp(PP_Host* h, int argc, const char** argv, void* user) {
     (void)user;
     if (argc >= 1) {
@@ -145,6 +162,7 @@ static int cmdStamp(PP_Host* h, int argc, const char** argv, void* user) {
     } else {
         g_stampOn = !g_stampOn;
     }
+    syncStamp(h);
     g_api->config_set(h, "stamp", g_stampOn ? "1" : "0");
     g_api->set_window_subtitle(h, g_stampOn ? "STAMP ON" : nullptr);
     g_api->log(h, PP_LOG_INFO, "标记框: %s", g_stampOn ? "开" : "关");
@@ -183,8 +201,8 @@ static int onLoad(PP_Host* host, const PP_HostApi* api) {
 }
 
 static int onStart(PP_Host* host) {
-    /* 帧处理器优先级 200：排在效果类插件之后，保证标记框画在最终画面上 */
-    g_stampProc = g_api->set_frame_processor(host, &stampProcessor, nullptr, 200);
+    /* 只有配置里存着 "stamp on" 才挂链 —— 默认不占链。 */
+    syncStamp(host);
     g_api->log(host, PP_LOG_INFO, "snapshot 启动 (帧处理器 id=%d, 累计 %d 张)", g_stampProc, g_counter);
     return 0;
 }

@@ -200,10 +200,36 @@ static int findEffect(const char* name) {
     return -1;
 }
 
+/* 帧处理器的**按需挂载**（2026-09-12）。
+ *
+ * 为什么不再"启动就挂、常驻到卸载"：帧处理器一旦挂上，宿主**每帧**都会调用它 ——
+ * 哪怕此刻一个效果都没开。代价不只是那点空回调：只要链非空，渲染层就必须走
+ * "CPU RGBA"这条路（插件的契约是可写 RGBA 像素），于是 NV12/GPU 路线下每帧还会
+ * 多一次 NV12→RGBA 物化。**不启用时不占链**，链才可能是空的。
+ * 顺带让"链上有几个帧处理器"成为一个诚实的观测点（见 effect.status 的 procId）。 */
+static void syncChain(PP_Host* h) {
+    const bool need = (g_mask != 0) || (g_dropEvery > 0);
+    if (need && !g_procId) {
+        g_procId = g_api->set_frame_processor(h, &frameProcessor, nullptr, 100);
+        g_api->log(h, PP_LOG_INFO, "已挂帧处理器 (id=%d)", g_procId);
+    } else if (!need && g_procId) {
+        const int old = g_procId;
+        g_api->remove_frame_processor(h, old);
+        g_procId = 0;
+        g_api->log(h, PP_LOG_INFO, "效果已全关，撤销帧处理器 (id=%d)", old);
+    }
+}
+
 static void updateSubtitle(PP_Host* h) {
     const char* s = svcSummary();
     if (strcmp(s, "none") == 0) g_api->set_window_subtitle(h, nullptr);
     else g_api->set_window_subtitle(h, s);
+}
+
+/** 任何改变效果状态的地方都走这里：同步帧链 + 标题。 */
+static void applyState(PP_Host* h) {
+    syncChain(h);
+    updateSubtitle(h);
 }
 
 static int cmdSet(PP_Host* h, int argc, const char** argv, void* user) {
@@ -219,11 +245,10 @@ static int cmdSet(PP_Host* h, int argc, const char** argv, void* user) {
     }
     g_mask = bit;
     g_api->config_set(h, "mask", argv[0]);
-    updateSubtitle(h);
+    applyState(h);
     g_api->log(h, PP_LOG_INFO, "效果已设为: %s", svcSummary());
     return 0;
 }
-
 static int cmdToggle(PP_Host* h, int argc, const char** argv, void* user) {
     (void)user;
     if (argc < 1) return -1;
@@ -231,7 +256,7 @@ static int cmdToggle(PP_Host* h, int argc, const char** argv, void* user) {
     if (bit < 0) { g_api->log(h, PP_LOG_WARN, "未知效果: %s", argv[0]); return -1; }
     if (bit == 0) g_mask = 0;
     else g_mask ^= bit;
-    updateSubtitle(h);
+    applyState(h);
     g_api->log(h, PP_LOG_INFO, "效果开关后: %s", svcSummary());
     return 0;
 }
@@ -240,7 +265,7 @@ static int cmdClear(PP_Host* h, int argc, const char** argv, void* user) {
     (void)argc; (void)argv; (void)user;
     g_mask = 0;
     g_dropEvery = 0;
-    updateSubtitle(h);
+    applyState(h);
     g_api->log(h, PP_LOG_INFO, "已清空全部效果");
     return 0;
 }
@@ -251,7 +276,7 @@ static int cmdCycle(PP_Host* h, int argc, const char** argv, void* user) {
     static int cycle = 0;
     cycle = (cycle + 1) % (FX_COUNT + 1);
     g_mask = (cycle == 0) ? 0 : (1 << (cycle - 1));
-    updateSubtitle(h);
+    applyState(h);
     g_api->log(h, PP_LOG_INFO, "效果轮转: %s", svcSummary());
     return 0;
 }
@@ -260,7 +285,7 @@ static int cmdDrop(PP_Host* h, int argc, const char** argv, void* user) {
     (void)user;
     int n = (argc >= 1) ? atoi(argv[0]) : 0;
     g_dropEvery = (n > 1) ? n : 0;
-    updateSubtitle(h);
+    applyState(h);
     g_api->log(h, PP_LOG_INFO, "丢帧设置: %s", g_dropEvery ? svcSummary() : "关闭");
     return g_dropEvery;
 }
@@ -296,7 +321,8 @@ static int onLoad(PP_Host* host, const PP_HostApi* api) {
 }
 
 static int onStart(PP_Host* host) {
-    g_procId = g_api->set_frame_processor(host, &frameProcessor, nullptr, 100);
+    /* 只有配置里真的存着效果/丢帧才挂链 —— 默认不占链（见 syncChain 的注释）。 */
+    syncChain(host);
     g_api->log(host, PP_LOG_INFO, "video_effects 启动 (帧处理器 id=%d, 初始效果=%s)",
                g_procId, svcSummary());
     return 0;
