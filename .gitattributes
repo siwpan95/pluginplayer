@@ -1,0 +1,50 @@
+# ============================================================================
+# PluginPlayer .gitattributes
+# ============================================================================
+# 与 .editorconfig 分工：这个文件钉住 GIT 产出/入库的形式，.editorconfig 钉住
+# 编辑器写盘的形式（git 的过滤器管不到编辑器）。
+# ----------------------------------------------------------------------------
+
+# ---- 文本：全仓规范化成 LF ----
+# 现有源码本来就全是 LF（可用 `git ls-files --eol` 复核），所以这条不产生改动，
+# 只是把"将来也必须是 LF"这件事写死，避免 core.autocrlf 在不同机器上各行其是。
+* text=auto eol=lf
+
+# ---- 例外：cmd.exe 批处理必须保持 CRLF ----
+# .bat/.cmd 若被折成 LF，cmd.exe 会有解析问题（尤其是带标签/续行的脚本）。
+# 这里显式标 -text：git 完全不参与这两个扩展名的行尾转换，core.autocrlf=true
+# 也管不到它们，入库字节与工作树字节一致。因为 -text 已经让 eol 属性失效，
+# 这里不需要再写 eol=crlf；`git ls-files --eol` 会显示 i/-text w/-text，即
+# 「入库是什么字节，检出就是什么字节」——正是我们要的。
+#
+# 与之配套的项目既有约定是「纯 ASCII」：cmd.exe 按当前代码页（本机 GBK）解读
+# .bat，文件里混入中文在非中文代码页的机器上会乱码/截断。生成这两类文件的
+# 代码是 build.py:make_launcher() 与 tools/pp_cli.py:shim_text()，两边都显式
+# 写 newline="\r\n" 且只用 ASCII。tests/cli_check.py 会回归这条契约。
+#
+# 注意：只有 .bat/.cmd 走这个例外，不要用 `* text=auto` 之外的通配去放宽其它
+# 扩展名 —— 那会让 Python 工具脚本在不同机器上产出行尾不一致的补丁。
+*.bat -text
+*.cmd -text
+
+# ---- 二进制：不做任何转换，也不参与文本合并/diff ----
+*.dll   binary
+*.exe   binary
+*.lib   binary
+*.a     binary
+*.dll.a binary
+*.pdb   binary
+*.so    binary
+*.png   binary
+*.bmp   binary
+*.jpg   binary
+*.ico   binary
+*.mp4   binary
+*.m4a   binary
+*.mp3   binary
+*.zip   binary
+*.7z    binary
+*.tgz   binary
+*.tar.gz binary
+*.gz    binary
+*.obj   binary

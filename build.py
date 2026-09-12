@@ -46,6 +46,31 @@ PLUGINS = ["osd_stats", "video_effects", "audio_viz", "snapshot", "hotkey_ext"]
 # 早期版本这两个文件不被任何脚本引用 —— 等于没有测试入口。
 SMOKE_TESTS = ["smoke_link", "smoke_audio"]
 
+# ---- 单元测试（--unit）----
+# 只编译**不依赖 SDL / FFmpeg** 的四个模块：util / config / eventbus / registry。
+# 它们的价值在于「纯逻辑 + 安全策略」（严格 JSON 解析、写入白名单、撤销语义），
+# 而且没有平台依赖 —— 所以同一套源码在 Windows(MinGW) 与 Linux(g++) 上都能跑，
+# Gitee Go 的 Ubuntu 构建环境正是靠这一点跑 C++ 单元测试（见 tools/ci.py）。
+UNIT_CORE_SOURCES = [
+    "src/core/util.cpp",
+    "src/core/config.cpp",
+    "src/core/eventbus.cpp",
+    "src/core/registry.cpp",
+]
+UNIT_TEST_SOURCES = [
+    "tests/unit/main.cpp",
+    "tests/unit/test_string.cpp",
+    "tests/unit/test_path.cpp",
+    "tests/unit/test_json.cpp",
+    "tests/unit/test_hash_png.cpp",
+    "tests/unit/test_eventbus.cpp",
+    "tests/unit/test_registry.cpp",
+    "tests/unit/test_config.cpp",
+]
+# 单元测试不需要 SDL3 / FFmpeg 的头文件，但 util.cpp 用了 bcrypt 做 SHA-256
+LDFLAGS_UNIT = ["-lbcrypt"] + ["-static-libgcc", "-static-libstdc++",
+                               "-Wl,-Bstatic", "-lwinpthread", "-Wl,-Bdynamic"]
+
 CXXFLAGS = [
     "-std=c++17", "-O2", "-Wall", "-Wextra",
     "-Wno-unused-parameter", "-DNDEBUG", "-s",     # -s: 去符号，发布体积小
@@ -88,11 +113,16 @@ def run(cmd, cwd=ROOT, quiet=False, env=None):
 
 
 def runtime_env():
-    """运行产物需要的 PATH：dist/ 与 vendor 下的 DLL 目录。
-    （build/*.exe 与 dist/ 不在同一目录，不补 PATH 会报 0xC0000135 找不到 DLL。）"""
+    """运行产物需要的 PATH：dist/ 与 vendor 下的 DLL 目录，外加**编译器自带的 bin**。
+    （build/*.exe 与 dist/ 不在同一目录，不补 PATH 会报 0xC0000135 找不到 DLL。）
+
+    编译器 bin 也要加：`libwinpthread-1.dll` / `libgcc_s_seh-1.dll` / `libstdc++-6.dll`
+    就在那里。少了它，单元测试这种"还没打包 dist/ 就要跑"的目标会以
+    0xC0000135 直接挂掉 —— 实测踩过。"""
     env = dict(os.environ)
-    extra = [DIST, os.path.join(VENDOR, "sdl3", "bin"), os.path.join(VENDOR, "ffmpeg", "bin")]
-    parts = [p for p in extra if os.path.isdir(p)]
+    extra = [DIST, os.path.join(VENDOR, "sdl3", "bin"), os.path.join(VENDOR, "ffmpeg", "bin"),
+             os.path.dirname(GXX)]
+    parts = [p for p in extra if p and os.path.isdir(p)]
     if parts:
         env["PATH"] = os.pathsep.join(parts + [env.get("PATH", "")])
     return env
@@ -168,6 +198,46 @@ def build_smoke_test(name, flags=None):
     print(f"[{'PASS' if rc2 == 0 else 'FAIL'}] 冒烟测试 {name} 运行退出码 {rc2}")
     if rc2 == 0xC0000135:
         print("        (0xC0000135 = 找不到 DLL；确认 dist/ 与 vendor/ 下运行时 DLL 已就位)")
+    return rc2 == 0
+
+
+def build_unit_tests(flags=None):
+    """编译并运行 C++ 单元测试（tests/unit/）。
+
+    刻意**不检查 vendor/**：单元测试只覆盖不依赖 SDL/FFmpeg 的模块，
+    所以"还没下依赖"的机器也该能跑测试 —— 依赖缺失不该挡住测试。
+    """
+    if not os.path.isfile(GXX):
+        print(f"[ERR] 找不到编译器: {GXX}")
+        return False
+    os.makedirs(BUILD, exist_ok=True)
+    out = os.path.join(BUILD, "pp_unit.exe")
+    srcs = [os.path.join(ROOT, s) for s in UNIT_TEST_SOURCES + UNIT_CORE_SOURCES]
+    missing = [s for s in srcs if not os.path.isfile(s)]
+    if missing:
+        print("[ERR] 单元测试源文件缺失:\n  " + "\n  ".join(missing))
+        return False
+    incs = ["-Isrc/sdk", "-Isrc/core", "-Itests/unit"]
+    if os.path.isdir(os.path.join(VENDOR, "sdl3", "include")):
+        incs.append("-Ivendor/sdl3/include")
+    if os.path.isdir(os.path.join(VENDOR, "ffmpeg", "include")):
+        incs.append("-Ivendor/ffmpeg/include")
+    cmd = [GXX] + (flags or CXXFLAGS) + incs + srcs + ["-o", out] + LDFLAGS_UNIT
+    rc, log = run(cmd)
+    if rc != 0:
+        print("[FAIL] 单元测试编译失败：\n" + log)
+        return False
+    print(f"[OK] {out}  ({os.path.getsize(out)/1024:.0f} KB)")
+
+    rc2, out2 = run([out], quiet=True, env=runtime_env())
+    text = out2 or ""
+    for line in text.strip().splitlines():
+        # 只转发用例结果与汇总，编译器的噪声不上屏
+        if line.startswith(("[PASS]", "[FAIL]", "==== 单元测试")) or line.strip().startswith("[x]"):
+            print("  " + line)
+    print(f"[{'PASS' if rc2 == 0 else 'FAIL'}] 单元测试运行退出码 {rc2}")
+    if rc2 == 0xC0000135:
+        print("        (0xC0000135 = 找不到 DLL；确认 %s 存在)" % os.path.dirname(GXX))
     return rc2 == 0
 
 
@@ -345,15 +415,21 @@ def release_summary():
 def make_launcher():
     # 纯 ASCII 内容 + CRLF：cmd.exe 按 GBK 解读 .bat，混入中文会在非中文代码页
     # 的机器上乱码/截断（旧版这里带中文注释，属可移植性问题）。
+    #
+    # 【踩过的坑】不要写 newline="\r\n"：那会让 open() 把字符串里**已经写好的**
+    # \n 再翻译一次，于是 "a\r\nb" 落盘成 "a\r\r\nb"（CR CR LF）—— 实测过，
+    # git diff 看着像 CRLF，实际每行多个 CR。正确做法是 newline="" 让内容原样落盘，
+    # 行尾由字符串自己给出（tools/pp_cli.py 的 write_text_exact 用的是同一套）。
+    # tools/verify.py 的 bat-ascii-crlf 门禁现在会检查"孤立的 CR"，防它再回来。
     bat = os.path.join(ROOT, "run.bat")
-    with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
+    with open(bat, "w", encoding="utf-8", newline="") as f:
         f.write("@echo off\r\n"
                 "rem PluginPlayer launcher: drag a media file onto this file to play it.\r\n"
                 "setlocal\r\n"
                 "cd /d %~dp0dist\r\n"
                 "pluginplayer.exe %*\r\n")
     selftest = os.path.join(ROOT, "selftest.bat")
-    with open(selftest, "w", encoding="utf-8", newline="\r\n") as f:
+    with open(selftest, "w", encoding="utf-8", newline="") as f:
         f.write("@echo off\r\n"
                 "rem One-click self test: build -> smoke -> make sample -> full chain -> JSON report\r\n"
                 "setlocal\r\n"
@@ -377,7 +453,39 @@ def make_launcher():
                 "pluginplayer.exe --selftest --frames 90 --out selftest_out test_assets\\sample.mp4\r\n"
                 "echo.\r\necho report: dist\\selftest_out\\selftest_report.json\r\n"
                 "pause\r\n")
-    print("[OK] 已生成 run.bat 与 selftest.bat（纯 ASCII，CRLF）")
+    ci = os.path.join(ROOT, "ci.bat")
+    with open(ci, "w", encoding="utf-8", newline="") as f:
+        f.write("@echo off\r\n"
+                "rem PluginPlayer one-click CI: gates + python/cpp unit tests + smoke + selftest + CLI.\r\n"
+                "rem Windows-only stages need Windows; on Linux use: python3 tools/ci.py --profile ci\r\n"
+                "rem Stages whose prerequisites are missing are SKIPPED with a reason (skip != pass).\r\n"
+                "setlocal\r\n"
+                "cd /d %~dp0\r\n"
+                "set \"PP_PY=F:\\Python314\\python.exe\"\r\n"
+                "if not exist \"%PP_PY%\" set \"PP_PY=\"\r\n"
+                "rem Do NOT use `if not defined X where py && set ...`: in cmd the && ends\r\n"
+                "rem the if scope (if guards only the first command), so set runs always.\r\n"
+                "if not defined PP_PY (\r\n"
+                "  where py >nul 2>nul\r\n"
+                "  if not errorlevel 1 set \"PP_PY=py -3\"\r\n"
+                ")\r\n"
+                "if not defined PP_PY (\r\n"
+                "  where python >nul 2>nul\r\n"
+                "  if not errorlevel 1 set \"PP_PY=python\"\r\n"
+                ")\r\n"
+                "if not defined PP_PY (\r\n"
+                "  echo [ERR] Python not found. Set PP_PYTHON to a python.exe path. 1>&2\r\n"
+                "  pause & exit /b 6\r\n"
+                ")\r\n"
+                "if not exist vendor\\ffmpeg\\lib (\r\n"
+                "  echo [WARN] vendor\\ is not ready: Windows stages will be SKIPPED.\r\n"
+                "  echo        Prepare it with: %PP_PY% tools\\fetch_deps.py\r\n"
+                ")\r\n"
+                "%PP_PY% tools\\ci.py %*\r\n"
+                "set \"PP_RC=%ERRORLEVEL%\"\r\n"
+                "if not \"%PP_RC%\"==\"0\" echo [FAIL] CI had failures, see output above.\r\n"
+                "exit /b %PP_RC%\r\n")
+    print("[OK] 已生成 run.bat、selftest.bat 与 ci.bat（纯 ASCII，CRLF）")
 
 
 def main():
@@ -386,6 +494,8 @@ def main():
     ap.add_argument("--core", action="store_true", help="只编译内核")
     ap.add_argument("--smoke", action="store_true",
                     help="编译并运行 tests/ 下的冒烟测试后退出")
+    ap.add_argument("--unit", action="store_true",
+                    help="编译并运行 C++ 单元测试（tests/unit/，不需要 vendor/）")
     ap.add_argument("--apitest", action="store_true",
                     help="编译插件 API 回归测试插件后退出")
     ap.add_argument("--release", action="store_true",
@@ -416,6 +526,10 @@ def main():
         print(f"\n{'[PASS]' if okAll else '[FAIL]'} 冒烟测试"
               f"{'全部通过' if okAll else '有失败项'}")
         return 0 if okAll else 1
+
+    if args.unit:
+        ok = build_unit_tests(CXXFLAGS_DEBUG if args.debug else CXXFLAGS)
+        return 0 if ok else 1
 
     if args.apitest:
         if not check_toolchain():

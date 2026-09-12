@@ -693,6 +693,11 @@ static std::string zlibStore(const std::string& raw) {
 static bool writePngImpl(const std::string& path, const uint8_t* pix, int w, int h,
                          int pitch, int channels) {
     if (!pix || w <= 0 || h <= 0) return false;
+    /* pitch 必须容得下一行像素。少了这个检查，调用方给错行距时
+     * `pix + y*pitch` 会读到相邻行之外（缓冲区小的时候就是越界读），
+     * 而且产物还是一张"看着正常"的错图 —— 属于"配错了要大声失败"那一类。
+     * （tests/unit/test_hash_png.cpp 有一条用例专门钉这个。） */
+    if (pitch < w * channels) return false;
     std::string raw;
     raw.reserve((size_t)h * (1 + (size_t)w * channels));
     for (int y = 0; y < h; y++) {

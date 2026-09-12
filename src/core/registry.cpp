@@ -108,6 +108,11 @@ int CommandRegistry::invoke(PP_Host* host, const std::string& name,
 
 int CommandRegistry::list(char* out, int outSize) const {
     std::lock_guard<std::mutex> lk(mu_);
+    /* 没有缓冲区就没有"已列出"的命令。少了这个判断，outSize<=0 会走到
+     * `s.resize(outSize - 1)` 即 resize((size_t)-1) → 抛 length_error，
+     * 而调用方（控制通道 command.list）并不会 expect 这个函数抛异常。
+     * tests/unit/test_registry.cpp 有一条用例钉这个边界。 */
+    if (!out || outSize <= 0) return 0;
     std::string s;
     std::vector<std::string> keys;
     for (const auto& kv : map_) keys.push_back(kv.first);

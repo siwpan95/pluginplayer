@@ -1,0 +1,38 @@
+# ============================================================================
+# PluginPlayer .editorconfig
+# ============================================================================
+# 与 .gitattributes 分工：那个钉住 GIT 入库/产出的形式，这个钉住编辑器写盘的
+# 形式 —— 也就是 git 过滤器触及不到的那条路径。
+#
+# 行尾约定与 .gitattributes 对齐：
+#   · 源码/文档/脚本一律 LF
+#   · .bat/.cmd 一律 CRLF（cmd.exe 对 LF 的批处理有解析问题），且必须是纯 ASCII
+# ============================================================================
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# cmd.exe 批处理：CRLF，且不许出现非 ASCII（按代码页解读，中文会乱码/截断）
+[*.{bat,cmd}]
+end_of_line = crlf
+charset = ascii
+indent_size = 2
+
+# Markdown 里行尾空格是有意义的（硬换行），不要自动删
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{json,yml,yaml,ini,cfg}]
+indent_size = 2
+
+[{*.c,*.h,*.cpp,*.hpp,*.cc}]
+indent_size = 4
+
+[Makefile]
+indent_style = tab

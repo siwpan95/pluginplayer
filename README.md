@@ -87,6 +87,159 @@ cd host-js && npm install && node src\index.mjs --port 7911
 
 ---
 
+## 命令行接口（CLI）
+
+上面那些命令都要敲 `F:\Python314\python.exe build.py ...` 这种长串。`tools/pp_cli.py`
+把整个项目包成一个 `pluginplayer` 命令，一次装好后在**任意目录**都能用：
+
+```bat
+:: 装一次（默认装到已在 PATH 上的 <Python>\Scripts，不改任何环境变量）
+F:\Python314\python.exe tools\pp_cli.py install-cli
+
+:: 之后
+pluginplayer doctor                         :: 环境体检（真校验：哈希/版本/端口）
+pluginplayer build --release                :: 转发给 build.py
+pluginplayer selftest                       :: 零参数自检（样例自动生成）
+pluginplayer open 影片.mp4 --hidden         :: 起播放器并开控制通道
+pluginplayer status                         :: 另一个窗口里查状态
+pluginplayer seek +30
+pluginplayer cmd effect.set gray
+pluginplayer events --seconds 30
+pluginplayer quit
+```
+
+两类能力（`pluginplayer --help` 有全量列表）：
+
+| 分组 | 命令 |
+|---|---|
+| 本地编排 | `open` `selftest` `plugins` `manifest` `build` `host-js` `doctor` `install-cli` `uninstall-cli` `version` |
+| 控制通道 | `status` `play` `pause` `toggle` `stop` `seek` `volume` `mute` `speed` `cmd` `commands` `services` `events` `rpc` `quit` |
+
+设计要点（细节与实测证据见 **[docs/CLI.md](docs/CLI.md)**）：
+
+- `pluginplayer 影片.mp4` 直接播（`open` 是默认命令）；`--` 之后原样透传给 `pluginplayer.exe`。
+- 每个命令都支持 `--json`；**分级退出码** `0/1/2/3/4/5/6/130`，转发类命令原样返回子进程退出码。
+- 参数边界与 `src/core/main.cpp` 一一对齐，非法值在**起进程之前**就退 2。
+- 命令垫片是**纯 ASCII + CRLF**（cmd.exe 按 GBK 解读 `.bat`），且解释器路径带引号、
+  解析顺序为 `PP_PYTHON` → 安装时记录的路径 → `py -3` → `python`。
+- 回归测试：`F:\Python314\python.exe tests\cli_check.py` → 实测 **28/28 通过**。
+
+---
+
+## 开发与验证
+
+一条命令跑完所有检查：
+
+```bat
+ci.bat                                       :: Windows 一键（门禁 → Python/C++ 单测 → 冒烟 → 自检 → CLI 回归）
+F:\Python314\python.exe tools\ci.py           :: 同上，直接调编排脚本；可 --list / --only / --profile ci
+```
+
+`tools/ci.py` 把检查拆成**阶段**，每段自己判断前提是否满足：满足就跑，不满足就记 `[SKIP]`
+并说明原因（跳过 ≠ 通过）。所以同一份编排在本机能跑全量、在 Linux 容器里能跑可移植子集，
+而且"哪一段在哪个环境跑不了"是显式可见的：
+
+| 阶段 | 环境 | 前提 |
+|---|---|---|
+| `gates` 机械门禁（`tools/verify.py`，17 条） | 跨平台 | 无 |
+| `py-unit` Python 单元测试（95 项） | 跨平台 | 标准库 |
+| `cpp-unit` C++ 单元测试（75 项） | 跨平台 | g++ / MinGW |
+| `smoke` 冒烟、`build` 构建、`selftest` 自检、`cli` CLI 回归、`release` 发布构建 | **仅 Windows** | vendor/ 或 dist/ |
+
+### 为什么 CI 只有一半是跨平台的
+
+Gitee Go 的托管构建环境是 **CentOS 8.3 / Ubuntu 20.04**（官方插件的 `build@python` /
+`build@gcc`），**没有 Windows runner**。而播放器是 Windows 独占的：MinGW 工具链 +
+SDL3/FFmpeg 的 Windows 二进制 + Winsock2。所以：
+
+- `.workflow/pluginplayer-ci.yml` 里的流水线**只跑可移植子集**（门禁 + 两种单元测试），
+  这一点写在那个文件的开头，不是遗漏；
+- 内核/插件的构建、冒烟、自检、发布构建**必须在 Windows 上有构建机**才跑得起来 ——
+  托管环境跑不了，只能在本地 `ci.bat`，或接一台自建 Windows 构建机。
+
+可移植子集能成立，是因为单元测试只覆盖 `util` / `config` / `eventbus` / `registry`
+四个**不碰 SDL/FFmpeg/WinAPI** 的模块（它们的 Windows API 调用都包在 `#ifdef _WIN32` 里）。
+这个前提由 `portable-modules` 门禁静态保证 —— 因为本机装不了 Linux，跑一遍证明不了，
+只能靠静态检查把它钉住。
+
+### 机械门禁（`tools/verify.py`）
+
+这个仓库里有很多"同一件事写在两处"的地方：数值边界在 C++ 与 CLI 各一份、控制通道方法名在
+`control.cpp` 与 `ARCHITECTURE.md` 各一份、命令数在插件代码与三处文档里各写一遍……。
+散文约束不了它们，所以每条「两处必须相等」的断言都被写成了可执行检查：
+
+```bat
+F:\Python314\python.exe tools\verify.py              :: 17 条门禁，<1 秒，不需要构建产物
+F:\Python314\python.exe tools\verify.py --list       :: 看有哪些
+F:\Python314\python.exe tools\verify.py --selfcheck  :: 对每条门禁做一次故意破坏，断言它必须报红
+```
+
+覆盖：`.bat/.cmd` 的 ASCII + CRLF 契约、插件完整性清单、发布载荷口径、C++ ↔ CLI 的 13 项
+数值边界、控制通道方法集、CLI 退出码表、CLI 命令表、依赖版本、第三方声明新鲜度、
+**可移植性（Linux CI 的前提）**、**CI 引用路径存在性**、文档内链、文档索引、目录树真实性、
+命令数、原生插件集、JS 插件数。
+
+**`--selfcheck` 是最有用的一条**：它把仓库复制到临时目录，对每条门禁施加一次针对性破坏
+（改掉一个边界值、从文档表里删一行、把插件 DLL 改 1 字节、往目录树里塞一个不存在的文件…），
+断言门禁必须报红。**一条永远为绿的门禁等于装饰品** —— 这条自检已经因此抓出过真问题：
+`build.py` 的 `make_launcher()` 曾用 `newline="\r\n"` 写入已经含 `\r\n` 的字符串，
+生成的 `run.bat` 每行实际是 **CR CR LF**，而"只数裸 LF"的旧检查完全看不出来（已修）。
+
+开发流程、测试层次、门禁细则、改动的验证门槛见 **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**；
+仓库约定与禁区见 **[AGENTS.md](AGENTS.md)**；文档索引见 **[docs/README.md](docs/README.md)**。
+
+可选装成本地钩子（只影响你自己的仓库配置，`git config --unset core.hooksPath` 撤销）：
+
+```bat
+git config core.hooksPath .githooks     :: 提交前自动跑 verify.py
+```
+
+---
+
+## 开源与合规（**对外分发前必读**）
+
+随包的 FFmpeg 来自 gyan.dev 的 `full_build-shared`，而**该构建是 GPL v3**：
+
+| 组件 | 版本 | 许可 | 随包文件 |
+|---|---|---|---|
+| FFmpeg | 9.0.1 `full_build-shared` | **GPL v3** | avcodec / avformat / avutil / swscale / swresample（约 118 MB） |
+| SDL3 | 3.4.16 | zlib | `SDL3.dll` |
+| Cordis / `@cordisjs/plugin-loader` | 4.0.0-rc.9 / 1.0.0-rc.6 | MIT | 不随 `dist/`（跑在 Node 侧） |
+| MinGW-w64 GCC 运行时 | GCC 16.1.0 | GPL v3 + Runtime Library Exception | libgcc / libstdc++ / libwinpthread |
+
+因此 `dist/` 这个发布物是 GPL v3 的衍生作品。对外分发前必须：附许可全文、标明改动、
+**提供对应源码的获取方式**（本构建对应 FFmpeg 提交 `bf1b838f2a`）、不得附加更严格的条款。
+
+逐条证据（含"随包 README.txt 原文写的就是 `License: GPL v3`"、随包 LICENSE 的 SHA-256 与
+FFmpeg 源码树的 `COPYING.GPLv3` 完全一致）与复核命令见 **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)**
+—— 那是**生成物**，由 `tools/gen_third_party_notices.py` 从 `vendor/` 头文件与随包档案读出来，
+改依赖后重跑即可，别手改。
+
+**本项目的许可**：`GPL-3.0-or-later`（[LICENSE](LICENSE) 是 GPLv3 的**逐字原文**，
+未做任何改动 —— 许可文本本身不允许修改）。选它的原因就是上面那条硬约束：
+随包分发的 FFmpeg 是 GPL v3，发布物整体受 GPL v3 约束，因此本项目**只能**用 GPL 兼容许可。
+
+```
+PluginPlayer — 插件版播放器
+Copyright (C) 2026 siwpan
+
+本程序是自由软件：你可以按自由软件基金会发布的 GNU 通用公共许可证条款
+重新分发和/或修改它，条款为第 3 版，或（由你选择）任何更新的版本。
+
+本程序的分发是希望它有用，但不提供任何担保，甚至不提供可商用或适用于
+特定用途的默示担保。详见 GNU 通用公共许可证。
+
+你应该已随本程序收到一份 GNU 通用公共许可证的副本；如果没有，见
+<https://www.gnu.org/licenses/>。
+```
+
+> 版权行的持有人写的是 Gitee 账号名 `siwpan`；要改成真名或组织名，
+> 只改上面那一段即可（**不要**去改 `LICENSE` 文件本身）。
+> 若需要非 GPL 的分发，唯一路径是自建 LGPL 配置的 FFmpeg 再替换 `dist/` 里的 DLL
+> （见 [DEPLOY.md](DEPLOY.md#1-部署前必须处理的一件事许可)）。
+
+---
+
 ## 安全模型
 
 这个播放器把"一切功能插件化"，代价是**接口能力很强**：控制通道能调用任意原生插件命令
@@ -198,11 +351,30 @@ pluginplayer/
 ├─ tests/smoke_link.cpp                工具链冒烟（SDL3 + FFmpeg 能否链接并解码）
 │     smoke_audio.cpp                  音频子系统冒烟（判定环境问题还是代码问题）
 │     plugin_apitest/plugin.cpp        插件 API 回归测试插件（插件用，不随发布物分发）
+│     cli_check.py                     命令行接口回归（垫片契约 + 退出码 + 真跑控制通道）
+│     unit/                            ★ C++ 单元测试（75 项，零依赖的极简 harness）
+│     python/                          ★ Python 单元测试（95 项，标准库 unittest）
 ├─ tools/fetch_deps.py                 依赖准备；rpc_client.py 控制通道测试客户端（带令牌）
-├─ build.py                            构建脚本（不依赖 cmake/make；--smoke / --apitest）
+│     pp_cli.py                        ★ 命令行接口本体（生成 pluginplayer 命令）
+│     verify.py                        ★ 机械门禁（17 条，<1 秒，--selfcheck 证明它们拦得住）
+│     ci.py                            ★ CI 编排（分阶段，前提缺失记 SKIP 并说明原因）
+│     gen_third_party_notices.py        第三方组件声明生成器（依赖/许可证据有变就得重跑）
+├─ pluginplayer.cmd / pp.cmd           命令垫片（纯 ASCII + CRLF，install-cli 生成）
+├─ ci.bat                              一键 CI（跑 tools/ci.py；与 run/selftest 同套生成方式）
+├─ build.py                            构建脚本（不依赖 cmake/make；--smoke / --unit / --apitest）
 ├─ .gitignore                          排除构建产物、第三方依赖、运行期产物与令牌文件
+├─ .gitattributes / .editorconfig      行尾与编码约定（.bat/.cmd 钉死 CRLF 与 ASCII）
+├─ .githooks/pre-commit                 可选本地钩子：提交前跑 tools/verify.py
+├─ .workflow/pluginplayer-ci.yml       Gitee Go 流水线（只跑可移植子集，原因写在文件头）
+├─ LICENSE                             GPLv3 原文（逐字未改）
+├─ AGENTS.md                          仓库约定、边界与禁区、改动的验证门槛（CLAUDE.md 指向它）
+├─ DEPLOY.md                           发布与部署：载荷口径、依赖升级、许可义务、排查
+├─ THIRD_PARTY_NOTICES.md              第三方组件许可与来源（**生成物，勿手改**）
+├─ docs/README.md                      文档索引：按"我要做什么"选读哪一份
 ├─ docs/ARCHITECTURE.md                线程模型 / A-V 同步 / 协议 / 安全模型 / 踩坑记录
 ├─ docs/PLUGIN_GUIDE.md                两种插件的开发指南（含可编译示例）
+├─ docs/CLI.md                         ★ 命令行接口参考（命令/退出码/设计原则/排查）
+├─ docs/DEVELOPMENT.md                 开发与验证：工具链、测试层次、门禁清单、CI 与边界对照表
 └─ dist/                               产物：exe(~510KB) + DLL + plugins/ + config/
 ```
 
@@ -393,6 +565,134 @@ pluginplayer/
 `test_assets/`），且可能残留上一轮手工放进去的 DLL。实测 `.bat` 产物为
 **0 个非 ASCII 字节、CRLF 行尾**（`cmd.exe` 按 GBK 解析 .bat，混入中文会乱码/截断）。
 
+### 10. 命令行接口 `tests/cli_check.py` —— 28/28 通过
+
+```
+==== CLI 回归: 28/28 项通过，跳过 0 项，失败 0 项 ====
+```
+
+不只是"跑起来没报错"，几条刻意加严的断言：
+
+- **垫片契约**：`shim_text()` 的产物必须**纯 ASCII + 全 CRLF**（真去 `encode("ascii")`
+  并数裸 LF 个数），且解释器调用行必须带引号；绝对路径版与 `%~dp0` 版除 root 赋值行外
+  必须逐字节一致（防止两份垫片各自漂移）。
+- **退出码逐个钉住**：未知命令 2 / 拼错给建议 2 / 非法数值 2 / `--size` 越界 2 /
+  媒体不存在 2 / 未知选项 2 / 端口未监听 3 / 认证或超时与连不上**分开**。
+- **参数先校验再启动**：`open --size 99999x99999` 必须在起进程之前就退 2
+  （测试里把 `run_inherit` 换掉，断言"根本没走到启动那一步"）。
+- **`--` 的语法归属**：同样的越界值放在 `--` 之前要被拦下，放在 `--` 之后必须
+  **原样落在 argv 末尾**（DSH 的"启动器只解析自己的 flag"原则）。
+- **插件完整性**：对 `dist/plugins/*.dll` **逐文件重算 SHA-256** 与清单比对，
+  而不是只看清单文件在不在。
+- **装卸回归**：`install-cli` → `uninstall-cli` 后目录必须为空；且往目标目录放一个
+  **别人手工写的同名 `pluginplayer.cmd`**，卸载时必须跳过、不能误删。
+- **真跑控制通道**：`status`（info/stats/volume 齐备）、`seek`（相对 + 绝对）、
+  `commands`（断言恰好 15 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`
+  （断言真收到 `app.tick`）。
+
+需要 `dist/` 或运行中播放器的用例在前提缺失时记 `SKIP` 且**不计入通过数**
+（跳过 ≠ 通过，与 `--selftest` 的口径一致）。
+
+经命令垫片从**别的目录**调用也实测过（工作目录 `C:\Windows`）：
+
+```
+pluginplayer.cmd --version    rc=0   pluginplayer-cli 1.0.0
+pluginplayer.cmd status       rc=0   媒体   : test_assets/sample.mp4
+pluginplayer.cmd seek +1      rc=0   [OK] 位置 -> 0:07.90
+pluginplayer.cmd commands     rc=0   effect.clear ... <plugin#5>
+pluginplayer.cmd doctor       rc=0   [OK] Python 3.14.7 @ F:\Python314\python.exe
+pp.cmd status                 rc=0   完整状态表（音量 0.800）
+```
+
+`quit` 之后复查端口：`port 7911 已释放，播放器已退出`。
+
+### 11. 机械门禁 `tools/verify.py` —— 17/17 通过，自检 18/18
+
+```
+==== 机械门禁: 17/17 通过，跳过 0 项，失败 0 项 ====
+
+[PASS] bat-ascii-crlf       4 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR
+[PASS] plugin-manifest      5 个 DLL 哈希与清单逐一相符
+[PASS] plugin-command-count 注册 15 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
+[PASS] native-plugin-set    5 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
+[PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
+[PASS] release-payload      17 个文件 / 127.0 MB，与 README 的 17 / 127 MB 一致
+[PASS] portable-modules     17 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
+[PASS] arg-bounds-align     13 项边界与 C++ 源码一致
+[PASS] rpc-methods-align    实现 19 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
+[PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应
+[PASS] cli-commands-align   25 个命令，README 与 docs/CLI.md 的表与实现一致
+[PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 1；Cordis 4.0.0-rc.9
+[PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
+[PASS] doc-links            22 条相对链接全部可解析
+[PASS] docs-index           4 份文档全部收录
+[PASS] readme-tree          目录结构里 47 个条目全部存在（按 basename 核对）
+[PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/*.yml, ci.bat）
+```
+
+**门禁自己也要被验证。** `--selfcheck` 对每条门禁做一次故意破坏，断言它必须报红：
+把 `.bat` 塞进非 ASCII 字节 / 折成裸 LF、改错 `cli_check.py` 的命令数断言、从 `build.py`
+的插件表里删一个、改错 README 的 JS 插件数、把 CLI 的窗口最小边改成 161、从
+`ARCHITECTURE.md` 的方法一览里删掉 `app.quit`、从退出码表里删掉 130 那行、往命令表里塞
+一个不存在的命令、改错依赖表里的 FFmpeg 版本、手改生成物、加一条死链、加一份没被索引的
+文档、往目录树里塞不存在的文件、把已登记插件改 1 字节、从 `dist/` 里删一个文件、
+在可移植模块里塞一句 Wind32 API 调用、把流水线引用的工具改个名 ——
+
+```
+[PASS] bat-ascii-crlf         拦住了：把 .bat 的行尾折成裸 LF
+[PASS] arg-bounds-align       拦住了：把 CLI 的窗口最小边改成 161（与 app.h 不符）
+[PASS] plugin-manifest        拦住了：把已登记插件改 1 个字节（必须靠重算哈希发现）
+[PASS] portable-modules       拦住了：在可移植模块的空行处塞一句 Windows API 调用
+...                                                            （共 18 项）
+==== 门禁自检: 18/18 通过，跳过 0 项，失败 0 项 ====
+```
+
+这条自检**已经产出了真实收益**，抓出的问题都不是顺手看到的：
+
+- 第一版里"把 `.bat` 折成裸 LF"这个用例始终拦不住，追下去才发现
+  `build.py:make_launcher()` 用 `newline="\r\n"` 写入了本身已含 `\r\n` 的字符串，
+  于是每个行尾实际是 **CR CR LF**；而只看"裸 LF 数"的旧检查对 `\r\r\n` 完全无感
+  （`\n` 都配了 `\r`）。修法是把 `newline` 改成 `""` 让内容原样落盘，
+  并给门禁加上"孤立 CR"检查。
+- `portable-modules` 门禁自身的两个解析缺陷也是被自检逼出来的：它一开始没跟踪
+  非 `_WIN32` 的预处理条件块（`util.cpp` 里嵌套的 `#ifndef WIN32_LEAN_AND_MEAN`
+  会把 `#endif` 提前配对掉），又把注释里的 API 名字当成真实调用。
+- `versions-align` 原本只判断"版本串在 README 里出现过"，而 README 在 CVE 表、变更记录里
+  也会出现同一个版本号 —— 改错依赖表照样过。已收紧为"必须在依赖表那一行里"。
+
+### 12. 单元测试与 CI —— 75 + 95 项通过，本地 CI 6/6 阶段
+
+```bat
+F:\Python314\python.exe build.py --unit                        :: C++ 单元测试
+F:\Python314\python.exe -m unittest discover -s tests\python   :: Python 单元测试
+ci.bat                                                          :: 一键跑全部
+```
+
+```
+==== 单元测试: 75/75 项通过，跳过 0 项，失败 0 项 ====       ← tests/unit/（C++，零依赖 harness）
+Ran 95 tests in 1.180s
+OK                                                          ← tests/python/（标准库 unittest）
+
+==== CI: 6/6 阶段通过，跳过 0 项，失败 0 项，用时 59.3s ====   ← ci.bat（本地全量）
+==== CI: 3/3 阶段通过，跳过 0 项，失败 0 项，用时 24.8s ====   ← --profile ci（可移植子集）
+```
+
+单元测试覆盖的是**纯逻辑与安全策略**（不是"跑起来没报错"）：
+
+| 套件 | 项 | 覆盖 |
+|---|---|---|
+| `string` | 10 | trim/lower/endsWith（大小写不敏感是刻意的）/split 保留空段/fmtTime/fmtBytes/pathJoin |
+| `path` | 11 | 白名单包含判定：前缀欺骗、`..` 穿越、大小写、UNC、`scheme://` 与盘符 `C://` 的区分 |
+| `json` | 12 | 严格 JSON：重复键、未闭合、尾随垃圾、01 前导零、深嵌套上限、转义往返、**键名出现在值里不误命中**、数组元素类型、键注入 |
+| `hash`/`png` | 7 | SHA-256 已知向量；PNG 独立重解析（签名/IHDR/**逐块 CRC32**/IDAT 解回像素逐字节比对/Adler32） |
+| `eventbus` | 13 | EMIT/WATERFALL/SERIAL/BAIL 四种语义、短路、owner 撤销、分发中撤销自身 |
+| `registry` | 11 | 服务/命令/帧链的注册与按 owner 撤销、优先级顺序、DROP/BAIL 短路、缓冲区边界 |
+| `config` | 9 | 注释与空白、重复键、dirty 语义（写同值不置脏）、原子保存、类型解析、超长行截断 |
+| Python | 95 | CLI 参数校验与全局选项抽取、令牌解析顺序、垫片字节契约、门禁解析器、生成器口径、**缺 vendor 时必须 SKIP 而不是 FAIL** |
+
+C++ 单元测试**刻意不依赖 vendor/**（只编不碰 SDL/FFmpeg 的四个模块），
+所以"还没下依赖"的机器和 Linux 容器都能跑 —— 这是 CI 能有意义的前提。
+
 ---
 
 ## 与原 playerdemo 的差异
@@ -406,7 +706,7 @@ pluginplayer/
 | 外部控制 | 无 | JSON-RPC 控制通道 |
 | 精确 seek | 无 | 有（seek 后丢帧对齐，`dropBefore_`） |
 | 音频时钟 | 音频/视频/外部三种主时钟 | 音频优先 + **停滞自动退回墙钟** |
-| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `build.py --smoke` 冒烟与 `--apitest` 插件 API 回归 |
+| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（170 项）、`tools/verify.py` 17 条机械门禁（含自检）、`ci.bat` 一键编排 |
 | 外部控制的安全 | 无外部控制 | JSON-RPC 强制令牌认证 + 报文/并发上限；网络输入默认拒绝 |
 
 ---
@@ -424,8 +724,28 @@ pluginplayer/
 
 ### 工程与安全（如实列出，未做或做不彻底的部分）
 
-- **测试仍然很薄**：只有 2 个冒烟程序 + 1 个插件 API 回归插件，**没有单元测试框架**，
-  也没有 CI。`build.py --smoke` / `--apitest` 是最小入口，不是完整测试网。
+- **许可被随包依赖"锁"住了**：`LICENSE` 是 `GPL-3.0-or-later`，这不是偏好而是约束 ——
+  随包 FFmpeg 来自 gyan.dev 的 `full_build-shared`（GPL v3），发布物整体受 GPL v3 约束，
+  所以**不能**改用 MIT/专有许可，除非先换成自建 LGPL 配置的 FFmpeg。
+  另外版权持有人当前写的是账号名 `siwpan`，要不要改成真名/组织名由你定。
+- **CI 只有一半是自动的**：`.workflow/pluginplayer-ci.yml` 走 Gitee Go，但它的托管构建
+  环境只有 Linux（CentOS/Ubuntu），**没有 Windows runner** —— 所以云端只跑门禁与两种单元
+  测试。内核/插件的**构建、冒烟、自检、发布构建必须在 Windows 上跑**：要么本地 `ci.bat`，
+  要么自建一台 Windows 构建机。**没有任何东西会"自动"在推送后验证 Windows 侧。**
+  另外那个流水线文件按官方 schema 编写，但**未在 Gitee Go 上实跑验证过**（开通需要在网页端
+  操作并绑定手机号）；Gitee Go 通常还要通过网页"新建流水线"才会接管 `.workflow/` 下的配置。
+- **测试仍然很薄（相对内核规模）**：单元测试只覆盖 `util` / `config` / `eventbus` / `registry`
+  四个模块 —— 它们够得着"纯逻辑与安全策略"，但**解码、A/V 同步、渲染、控制通道的并发**都
+  没有单元测试，只能靠 `--selftest` 的端到端检查兜。**仍然没有覆盖率工具**。
+- **`tests/cli_check.py` 覆盖的是 CLI 的行为**（垫片、退出码、真跑控制通道，实跑 28/28）；
+  单元测试覆盖的是纯逻辑。两者都不覆盖内核的**解码正确性**（只验证"解出了 90 帧"，
+  不验证"解出来的像素对不对"）—— 那需要参考帧比对，目前没做。内核与插件的回归仍靠
+  `--selftest` / `--smoke` / `--apitest` 三个入口，是"最小入口"而不是完整测试网。
+- **命令行接口不随 `dist/` 发布**：`tools/pp_cli.py` 是仓库侧的运维工具，
+  靠 `install-cli` 装进 PATH 目录。`dist/` 保持"17 个文件 / 127 MB"的干净载荷，
+  口径与 `build.py --release` 一致（把 CLI 塞进去会让这个口径失真）。
+  `pluginplayer.cmd` / `pp.cmd` 是生成物但**纳入版本控制** ——
+  这样 clone 下来不带 PATH 也能用，且行尾契约由 `.gitattributes` 钉住。
 - **依赖组件的 CVE（已逐条核查，风险等级：常规）**：随包的 FFmpeg 9.0.1 是当前最新稳定版，
   逐条核对受影响区间后确认——此前担心的一批 CVE（`CVE-2025-9951`、`CVE-2026-58049`、
   `CVE-2026-12706`、`CVE-2026-65704`、`CVE-2026-65706`、`CVE-2026-66037`、`CVE-2026-6483x` 等）

@@ -1,0 +1,78 @@
+# ============================================================================
+# Gitee Go 流水线描述文件
+# ============================================================================
+# 配置文件位置与格式依据 Gitee 官方帮助：
+#   · 描述文件放在仓库根目录的 `.workflow/` 下（见 help.gitee.com/gitee-go/get-started-in-3-steps）
+#   · 结构为 version / name / displayName / triggers / stages[].steps[]，
+#     step 取值形如 `build@python` / `build@gcc`（见 help.gitee.com/gitee-go/plugin/ci-build）
+#
+# ---------------------------------------------------------------------------
+# 【为什么只有这些阶段 —— 请先读这段】
+#
+# Gitee Go 的托管构建环境是 **CentOS 8.3 / Ubuntu 20.04**，**没有 Windows 构建环境**。
+# 而这个播放器是 Windows 独占的：MinGW 工具链 + SDL3/FFmpeg 的 Windows 二进制 + Winsock2。
+# 所以下面只跑了**可移植子集**，Windows 独占的阶段（构建内核、冒烟、自检、CLI 回归、
+# 发布构建）**不在这里**，需要自建 Windows 构建机，或在本地跑：
+#
+#     本地一键：ci.bat
+#     本地分阶段：python tools\ci.py            # 前提不满足的阶段会明确记 SKIP
+#
+# 可移植子集之所以能在 Linux 上跑，是因为：
+#   · tools/verify.py    只读仓库文本（机械门禁）
+#   · tests/python/      标准库 unittest
+#   · tests/unit/        只覆盖 util/config/eventbus/registry 四个不碰 SDL/FFmpeg/WinAPI 的模块
+# 这条"可移植"前提由 `tools/verify.py` 的 **portable-modules** 门禁静态保证：
+# 那四个模块里的 Windows API 必须包在 `#ifdef _WIN32` 分支内，否则门禁报红。
+#
+# 【诚实标注】本文件按官方文档的 schema 编写，但**未在 Gitee Go 上实跑验证过**
+# （开通 Gitee Go 需要在网页端操作并绑定手机号，无法从仓库侧触发）。
+# 另外：Gitee Go 的流水线通常要通过网页"新建流水线"保存才会生成/接管 `.workflow/` 下的
+# 描述文件；直接把文件提交上去**不保证**会自动注册成流水线（官方 issue 区有此类反馈）。
+# 正确做法：网页端开通 Gitee Go → 新建流水线 → 用代码视图粘贴/对齐本文件。
+# ============================================================================
+
+version: '1.0'
+name: pluginplayer-ci
+displayName: PluginPlayer CI（可移植子集）
+
+triggers:
+  push:
+    branches:
+      precise:
+        - main
+  pr:
+    branches:
+      precise:
+        - main
+
+stages:
+  # ---- 阶段 1：机械门禁 + Python 单元测试（纯 Python，不需要编译器）----
+  - stage:
+    name: checks
+    displayName: 门禁与 Python 单元测试
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: build@python
+        name: gates_and_pyunit
+        displayName: verify.py + unittest
+        pythonVersion: '3.9'
+        commands:
+          - python3 --version
+          - python3 tools/ci.py --profile ci --only gates,py-unit
+
+  # ---- 阶段 2：C++ 单元测试（Ubuntu 20.04 + gcc，C++17 足够）----
+  - stage:
+    name: cpp
+    displayName: C++ 单元测试
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: build@gcc
+        name: cpp_unit
+        displayName: tests/unit/ 编译并运行
+        gccVersion: '9.4'
+        commands:
+          - g++ --version
+          # ci.py 在非 Windows 上直接用 PATH 里的 g++，不需要 vendor/（单元测试不依赖 SDL/FFmpeg）
+          - python3 tools/ci.py --profile ci --only cpp-unit

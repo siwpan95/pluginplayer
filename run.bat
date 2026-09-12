@@ -1,5 +1,5 @@
-@echo off
-rem PluginPlayer launcher: drag a media file onto this file to play it.
-setlocal
-cd /d %~dp0dist
-pluginplayer.exe %*
+@echo off
+rem PluginPlayer launcher: drag a media file onto this file to play it.
+setlocal
+cd /d %~dp0dist
+pluginplayer.exe %*

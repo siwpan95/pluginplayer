@@ -1,0 +1,46 @@
+#!/bin/sh
+# PluginPlayer pre-commit gate (opt-in).
+#
+# 安装:   git config core.hooksPath .githooks
+# 撤销:   git config --unset core.hooksPath
+#
+# 只跑静态机械门禁 —— 快（<1 秒）、不构建、不联网、不改文件。
+# 构建/自检/发布构建不放在钩子里（见 AGENTS.md「改动的验证门槛」）。
+#
+# 用 PP_PYTHON 可以指定解释器；找不到 Python 时跳过而不是拦下提交
+# （钩子不该让人在没装 Python 的机器上无法提交）。
+#
+# 注意：本文件必须保持 LF 行尾（git 的 * text=auto eol=lf 已覆盖它）。
+# 带 CRLF 会让 sh 解释器把 \r 当成命令的一部分而报错。
+
+ROOT=$(git rev-parse --show-toplevel) || exit 0
+
+if [ -n "${PP_PYTHON:-}" ]; then
+  PY=$PP_PYTHON
+elif [ -x "F:/Python314/python.exe" ]; then
+  PY="F:/Python314/python.exe"
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v py >/dev/null 2>&1; then
+  PY="py -3"
+else
+  echo "[pre-commit] 未找到 Python，跳过 tools/verify.py（可用 PP_PYTHON 指定解释器）" >&2
+  exit 0
+fi
+
+if [ ! -f "$ROOT/tools/verify.py" ]; then
+  echo "[pre-commit] 跳过：$ROOT/tools/verify.py 不存在" >&2
+  exit 0
+fi
+
+echo "[pre-commit] 机械门禁: tools/verify.py"
+# shellcheck disable=SC2086
+$PY "$ROOT/tools/verify.py"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "" >&2
+  echo "[pre-commit] 门禁未通过，提交已拦下。" >&2
+  echo "             按上面每条 FAIL 给出的差异修，不要改松门禁。" >&2
+  echo "             确实要绕过: git commit --no-verify（不建议，见 AGENTS.md）" >&2
+fi
+exit $rc
