@@ -126,6 +126,16 @@ struct YuvColorChoice {
 
 YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int height);
 
+/* 注：曾实现过 sdlColorspaceFor()（把上面的选择映射成 SDL_Colorspace，供 NV12 纹理
+ * 在创建时告知矩阵/范围），随 NV12 纹理路线一起回退了 —— 那条路在本项目的插件形态下
+ * 是净损失，见 ENHANCEMENT_PLAN 的 P0-4b'。SDL 的取值表记在规划文档里备查：
+ *   BT601_LIMITED=0x211018c6  BT601_FULL=0x221018c6
+ *   BT709_LIMITED=0x21100421  BT709_FULL=0x22100421
+ *   BT2020_LIMITED=0x21102609 BT2020_FULL=0x22102609
+ * 另注：SDL 3.4.16 **没有** SDL_SetTextureColorSpace，色彩空间只能在
+ * SDL_CreateTextureWithProperties 时通过
+ * SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER 给（NV12 的默认值是 SDL_COLORSPACE_JPEG）。 */
+
 /* ---- 抓屏取证：矩形内"恰好等于指定颜色"的像素占比 ----
  * 参数非法（空指针 / 尺寸非正 / pitch < w*4 / 矩形容不下任何像素）时返回 **-1.0**，
  * 调用方据此区分"占比为 0"与"压根没量到"；否则返回 0..1。

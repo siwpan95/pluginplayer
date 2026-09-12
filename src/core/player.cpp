@@ -9,6 +9,8 @@
 extern "C" {
 #include <libavutil/time.h>
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
@@ -168,6 +170,12 @@ int Player::interruptCb(void* opaque) {
 bool Player::open(const std::string& path) {
     close();
     path_ = path;
+    /* 硬解开关：环境变量与项目里既有惯例一致（PP_WEB_REMOTE / PP_RPC_TOKEN 同款）。
+     * 用途是排障与 A/B —— 硬解出问题时能一键确认"是不是硬解的锅"。 */
+    {
+        const char* v = getenv("PP_NO_HWDEC");
+        hwRequested_ = !(v && *v && *v != '0');
+    }
 
     int ret = avformat_open_input(&fmt_, path.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -267,6 +275,54 @@ bool Player::open(const std::string& path) {
     return true;
 }
 
+/* ---------------- 硬件解码（D3D11VA） ---------------- */
+
+enum AVPixelFormat Player::hwGetFormatCb(AVCodecContext* ctx,
+                                         const enum AVPixelFormat* fmt) {
+    Player* p = (Player*)ctx->opaque;
+    return p ? p->pickHwFormat(fmt) : fmt[0];
+}
+
+enum AVPixelFormat Player::pickHwFormat(const enum AVPixelFormat* fmt) const {
+    /* 优先用我们准备好的硬件格式（D3D11）。 */
+    for (const enum AVPixelFormat* f = fmt; *f != AV_PIX_FMT_NONE; ++f)
+        if (*f == hwPixFmt_) return *f;
+    /* 解码器不支持：退回第一个**软件**格式。
+     * 注意不能直接用 fmt[0] —— 列表里可能全是硬件格式，
+     * 那样解码器会拿到一个它无法输出的格式，avcodec_open2 之后每帧都失败。 */
+    for (const enum AVPixelFormat* f = fmt; *f != AV_PIX_FMT_NONE; ++f) {
+        const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(*f);
+        if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL)) return *f;
+    }
+    PP_WARN("get_format 没能选出一个可用格式，交给解码器默认（fmt[0]=%d）", (int)fmt[0]);
+    return fmt[0];
+}
+
+bool Player::openHwDevice() {
+    /* 只尝试 D3D11VA：本项目是 Windows 独占，D3D11 是覆盖面最好的一个
+     * （Intel/AMD/NVIDIA 都支持，且与 SDL3 的 d3d11 渲染后端同源）。 */
+    int r = av_hwdevice_ctx_create(&hwDevCtx_, AV_HWDEVICE_TYPE_D3D11VA,
+                                   nullptr, nullptr, 0);
+    if (r < 0) {
+        char err[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(r, err, sizeof(err));
+        PP_INFO("硬件解码不可用（D3D11VA 设备创建失败: %s），改用软解", err);
+        hwDevCtx_ = nullptr;
+        return false;
+    }
+    hwPixFmt_ = AV_PIX_FMT_D3D11;
+    PP_INFO("已创建 D3D11VA 解码设备，将尝试硬件解码");
+    return true;
+}
+
+void Player::closeHwDevice() {
+    if (hwXferFrame_) { av_frame_free(&hwXferFrame_); hwXferFrame_ = nullptr; }
+    if (hwDevCtx_) { av_buffer_unref(&hwDevCtx_); hwDevCtx_ = nullptr; }
+    hwPixFmt_ = AV_PIX_FMT_NONE;
+    hwActive_ = false;
+    hwName_ = "";
+}
+
 bool Player::openVideoCodec(int idx) {
     AVStream* st = fmt_->streams[idx];
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
@@ -278,9 +334,32 @@ bool Player::openVideoCodec(int idx) {
     if (!vCtx_) return false;
     if (avcodec_parameters_to_context(vCtx_, st->codecpar) < 0) return false;
     vCtx_->pkt_timebase = st->time_base;
+
+    /* 先试硬解。失败路径必须**无副作用**地退回软解：清掉 get_format/opaque，
+     * 让解码器按自己的默认格式走。 */
+    if (hwRequested_ && openHwDevice()) {
+        vCtx_->opaque = this;
+        vCtx_->get_format = &Player::hwGetFormatCb;
+        vCtx_->hw_device_ctx = av_buffer_ref(hwDevCtx_);
+        if (!vCtx_->hw_device_ctx) {
+            PP_WARN("硬件解码上下文引用失败，改用软解");
+            vCtx_->get_format = nullptr;
+            vCtx_->opaque = nullptr;
+            closeHwDevice();
+        }
+    }
+
     if (avcodec_open2(vCtx_, codec, nullptr) < 0) {
         PP_ERROR("avcodec_open2(视频) 失败");
         return false;
+    }
+    /* 解码器没调 get_format 就说明它不支持这套硬件帧 —— 把引用还回去，
+     * 免得留一个"看起来在用硬解"的假状态（真用没用上以第一帧的格式为准）。 */
+    if (vCtx_->hw_device_ctx && vCtx_->get_format != &Player::hwGetFormatCb) {
+        vCtx_->get_format = nullptr;
+        vCtx_->opaque = nullptr;
+        av_buffer_unref(&vCtx_->hw_device_ctx);
+        closeHwDevice();
     }
     srcW_ = vCtx_->width;
     srcH_ = vCtx_->height;
@@ -348,6 +427,7 @@ void Player::close() {
     if (sws_) { sws_freeContext(sws_); sws_ = nullptr; }
     if (swr_) { swr_free(&swr_); swr_ = nullptr; }
     if (vCtx_) avcodec_free_context(&vCtx_);
+    closeHwDevice();      /* avcodec_free_context 会放开它自己那份 hw_device_ctx 引用 */
     if (aCtx_) avcodec_free_context(&aCtx_);
     if (fmt_)  avformat_close_input(&fmt_);
 
@@ -564,10 +644,33 @@ void Player::videoDecodeLoop() {
                 /* seek 后丢弃目标点之前的画面，保证跳到用户指定位置 */
                 if (pts < dropBefore_.load()) { av_frame_unref(fr); continue; }
 
+                /* 硬件帧先下载到系统内存再往下走。
+                 * 这一步是"半零拷贝"：解码在 GPU、后续处理在内存。真正的零拷贝
+                 * （把 ID3D11Texture2D 直接包成 SDL 纹理）留到 P0-4 的后续批次 ——
+                 * 它要求 FFmpeg 与 SDL 共用同一个 D3D11 设备，改动面更大。 */
+                AVFrame* src = fr;
+                if (hwPixFmt_ != AV_PIX_FMT_NONE && fr->format == hwPixFmt_) {
+                    if (!hwXferFrame_) hwXferFrame_ = av_frame_alloc();
+                    if (!hwXferFrame_ || av_hwframe_transfer_data(hwXferFrame_, fr, 0) < 0) {
+                        PP_WARN("硬件帧下载失败，丢弃该帧（第 %lld 帧）",
+                                (long long)frameIndex_.load());
+                        av_frame_unref(fr);
+                        continue;
+                    }
+                    src = hwXferFrame_;
+                    if (!hwActive_) {
+                        hwActive_ = true;
+                        hwName_ = "d3d11va";
+                        PP_INFO("硬件解码已生效: d3d11va（帧格式 %s → 下载为 %s）",
+                                av_get_pix_fmt_name(hwPixFmt_),
+                                av_get_pix_fmt_name((AVPixelFormat)src->format));
+                    }
+                }
+
                 /* 目标尺寸：按 coded 尺寸做像素格式转换，方向比交给渲染层 */
-                int w = fr->width > 0 ? fr->width : srcW_;
-                int h = fr->height > 0 ? fr->height : srcH_;
-                if (w <= 0 || h <= 0) { av_frame_unref(fr); continue; }
+                int w = src->width > 0 ? src->width : srcW_;
+                int h = src->height > 0 ? src->height : srcH_;
+                if (w <= 0 || h <= 0) { av_frame_unref(src); av_frame_unref(fr); continue; }
 
                 /* 色彩矩阵与电平范围：必须按标注来，不能靠 swscale 猜。
                  * 取值优先级链：
@@ -597,17 +700,20 @@ void Player::videoDecodeLoop() {
                 if (csId == 2) csSrc = "按分辨率推测";
                 YuvColorChoice cc = chooseYuvColor(csId, rgId, w, h);
 
-                /* 这两项也进重建条件 —— 素材中途换色彩标注（合流/拼接）时要重建上下文。 */
-                if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != fr->format ||
+                /* 这两项也进重建条件 —— 素材中途换色彩标注（合流/拼接）时要重建上下文。
+                 * 注意用 src->format：硬解帧下载后是 NV12，sws 的输入格式以它为准
+                 * （写 fr->format 会拿硬件格式去比较，导致每帧都重建 sws）。 */
+                if (!sws_ || swsW_ != w || swsH_ != h || swsFmt_ != src->format ||
                     swsCs_ != cc.matrix || swsRange_ != cc.fullRange) {
                     if (sws_) sws_freeContext(sws_);
-                    sws_ = sws_getContext(w, h, (AVPixelFormat)fr->format,
+                    sws_ = sws_getContext(w, h, (AVPixelFormat)src->format,
                                           w, h, AV_PIX_FMT_RGBA,
                                           SWS_BILINEAR, nullptr, nullptr, nullptr);
-                    swsW_ = w; swsH_ = h; swsFmt_ = fr->format;
+                    swsW_ = w; swsH_ = h; swsFmt_ = src->format;
                     swsCs_ = cc.matrix; swsRange_ = cc.fullRange;
                     if (!sws_) {
-                        PP_ERROR("sws_getContext 失败 (fmt=%d)", fr->format);
+                        PP_ERROR("sws_getContext 失败 (fmt=%d)", src->format);
+                        av_frame_unref(src);
                         av_frame_unref(fr);
                         continue;
                     }
@@ -641,7 +747,8 @@ void Player::videoDecodeLoop() {
 
                 uint8_t* dst[4] = {vf->rgba.data(), nullptr, nullptr, nullptr};
                 int dstLs[4] = {vf->pitch, 0, 0, 0};
-                sws_scale(sws_, fr->data, fr->linesize, 0, h, dst, dstLs);
+                sws_scale(sws_, src->data, src->linesize, 0, h, dst, dstLs);
+                if (src != fr) av_frame_unref(src);   /* 硬件帧下载缓冲，复用不释放 */
                 av_frame_unref(fr);
 
                 /* 入队；队列满则等待（seek/abort 时立刻放弃） */

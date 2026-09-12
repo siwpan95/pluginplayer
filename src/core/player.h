@@ -38,7 +38,14 @@ struct SwrContext;
 
 namespace pp {
 
-/** 一帧已转换好的 RGBA8888 像素。 */
+/** 一帧已转换好的 RGBA8888 像素。
+ *
+ * 为什么保留 RGBA 而不是改成 NV12：插件帧处理链（`PP_FrameView`）的契约就是
+ * "可写的 RGBA 像素"，而内置插件会在启动时注册帧处理器 —— 也就是说**常规路径上
+ * 永远有链存在**。2026-09-12 曾试过"默认 NV12、有人要 RGBA 才物化"，
+ * 实测在装了帧处理器的场景下会多出一次全帧转换（4K 掉帧从 11 涨到 78），
+ * 所以回退了。要再走这条路，得先让插件按需挂帧处理器（不启用时不占链），
+ * 详见 ENHANCEMENT_PLAN 的 P0-4b'。 */
 struct VideoFrame {
     std::vector<uint8_t> rgba;
     int      w = 0;
@@ -137,6 +144,8 @@ public:
     bool   finished() const;
     bool   hasAudio() const { return aStream_ >= 0; }
     bool   hasVideo() const { return vStream_ >= 0; }
+    /** 实际生效的硬件解码名（"d3d11va"），纯软解时返回空串。 */
+    const char* hwdecName() const { return hwActive_ ? hwName_ : ""; }
 
     void   fillMediaInfo(PP_MediaInfo* out) const;
     void   fillStats(PP_PlaybackStats* out);
@@ -176,6 +185,21 @@ private:
     bool openAudioCodec(int idx);
     void flushAfterSeek(double target);
     static int interruptCb(void* opaque);
+
+    /* --- 硬件解码（D3D11VA）---
+     * 只在 openVideoCodec 里尝试；任何一步失败都不报错，只打日志并退回软解 ——
+     * "能硬解就硬解、不能就软解"必须是自动的，不能让用户去配。 */
+    static enum AVPixelFormat hwGetFormatCb(AVCodecContext* ctx,
+                                           const enum AVPixelFormat* fmt);
+    enum AVPixelFormat pickHwFormat(const enum AVPixelFormat* fmt) const;
+    bool openHwDevice();
+    void closeHwDevice();
+    bool  hwRequested_ = true;                 /* PP_NO_HWDEC=1 时置 false */
+    bool  hwActive_ = false;                   /* 真的解出了硬件帧才置 true */
+    const char* hwName_ = "";
+    AVBufferRef*   hwDevCtx_ = nullptr;        /* AVHWDeviceContext(D3D11VA) */
+    AVPixelFormat  hwPixFmt_ = AV_PIX_FMT_NONE;/* 硬解帧的格式（AV_PIX_FMT_D3D11） */
+    AVFrame*       hwXferFrame_ = nullptr;     /* av_hwframe_transfer_data 的落地帧（复用） */
 
     /* --- 媒体 --- */
     AVFormatContext* fmt_ = nullptr;

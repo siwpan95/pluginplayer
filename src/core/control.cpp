@@ -439,11 +439,13 @@ std::string RpcServer::handleRequest(const std::string& line, const std::shared_
         return ok(format(
             "{\"path\":\"%s\",\"format\":\"%s\",\"video_codec\":\"%s\",\"audio_codec\":\"%s\","
             "\"width\":%d,\"height\":%d,\"fps\":%.4f,\"duration\":%.4f,\"bitrate\":%lld,"
-            "\"sample_rate\":%d,\"channels\":%d,\"has_video\":%d,\"has_audio\":%d}",
+            "\"sample_rate\":%d,\"channels\":%d,\"has_video\":%d,\"has_audio\":%d,"
+            "\"hwdec\":\"%s\"}",
             jsonEscape(mi.path).c_str(), jsonEscape(mi.format).c_str(),
             jsonEscape(mi.video_codec).c_str(), jsonEscape(mi.audio_codec).c_str(),
             mi.width, mi.height, mi.fps, mi.duration, (long long)mi.bitrate,
-            mi.audio_sample_rate, mi.audio_channels, mi.has_video, mi.has_audio));
+            mi.audio_sample_rate, mi.audio_channels, mi.has_video, mi.has_audio,
+            pl->hwdecName()));
     }
 
     if (method == "player.stats") {
@@ -454,11 +456,12 @@ std::string RpcServer::handleRequest(const std::string& line, const std::shared_
             "{\"position\":%.3f,\"duration\":%.3f,\"master_clock\":%.3f,\"video_clock\":%.3f,"
             "\"audio_clock\":%.3f,\"speed\":%.3f,\"paused\":%d,\"eof\":%d,"
             "\"decoded\":%lld,\"displayed\":%lld,\"dropped\":%d,\"fps\":%.2f,"
-            "\"vqueue\":%lld,\"abuf\":%lld}",
+            "\"vqueue\":%lld,\"abuf\":%lld,\"hwdec\":\"%s\"}",
             st.position, st.duration, st.master_clock, st.video_clock, st.audio_clock,
             st.speed, st.paused, st.eof,
             (long long)st.decoded_frames, (long long)st.displayed_frames, st.dropped_frames,
-            st.current_fps, (long long)st.video_queue_depth, (long long)st.audio_buffer_bytes));
+            st.current_fps, (long long)st.video_queue_depth, (long long)st.audio_buffer_bytes,
+            pl->hwdecName()));
     }
 
     if (method == "player.play" || method == "player.pause" ||

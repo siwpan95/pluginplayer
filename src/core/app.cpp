@@ -366,7 +366,12 @@ bool App::pumpAndUpload(bool force) {
     if (!force && frame->index == lastUploadedIndex_) return false;
     lastUploadedIndex_ = frame->index;
 
-    /* 插件帧处理链（WATERFALL：可原地改写像素 / 中止链 / 丢弃帧） */
+    /* 插件帧处理链（WATERFALL：可原地改写像素 / 中止链 / 丢弃帧）。
+     * 帧的格式必须是 RGBA：插件的契约就是"可写的 RGBA 像素"。
+     * 2026-09-12 试过把这里换成 NV12 纹理 + GPU 做 YUV→RGB，实测**在本项目的
+     * 插件形态下是净损失**：内置插件启动即注册帧处理器（链恒非空），
+     * 于是每帧要多做一次 NV12→RGBA 物化，4K 掉帧从 11 涨到 78。
+     * 那条路要成立，前提是插件"不启用时不占帧链"，见 ENHANCEMENT_PLAN 的 P0-4b'。 */
     PP_FrameView view{};
     view.data = frame->rgba.data();
     view.width = frame->w;
@@ -698,10 +703,10 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
                 if (savedPngs < 3 &&
                     (displayed == 1 || displayed == frameTarget / 2 || displayed == frameTarget)) {
                     std::string p = pathJoin(outDir, format("frame_%03d.png", savedPngs + 1));
-                    if (writePngRGBA(p, frame->rgba.data(), frame->w, frame->h, frame->pitch)) {
+                    if (writePngRGBA(p, view.data, view.width, view.height, view.pitch)) {
                         savedPngs++;
                         PP_INFO("已保存帧快照: %s (%dx%d, pts=%.3f)",
-                                p.c_str(), frame->w, frame->h, frame->pts);
+                                p.c_str(), view.width, view.height, view.pts);
                     }
                 }
             } else {

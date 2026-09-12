@@ -16,7 +16,7 @@
 | 1 | **自检的"可视证据图" `render_output.bmp` 里根本没有视频画面** —— 86.62% 的像素恰好等于窗口清屏色 `RGB(16,16,20)`，纯黑占 0.00%，非背景部分只有 OSD。也就是说这张证据图从启用以来就没有证明过"画面出得来" | ~~已实测确认~~ → **已修复（B1，2026-09-12）**，同一指标 86.60% → 0.39% | 像素直方图（§1.3）+ `app.cpp:352` 与 `app.cpp:700` 的交互；修复记录见 §4 P0-1 |
 | 2 | OSD 用 SDL 调试点阵字体 + `sanitize()` 把非 ASCII 全部降级成 `?`，**中文界面信息 100% 不可读** | **已实测确认** | 抓屏截图（§1.4）+ `osd.cpp:44-66` + `player_plugin.h:274` |
 | 3 | OSD 默认**压在画面上**：16:9 窗口播 16:9 素材时没有黑边可避让，而两个 OSD 面板正好盖住左上角（素材水印所在处） | **已实测确认** | §1.4 截图与几何计算（§2.5） |
-| 4 | 渲染/解码链路**没有色彩管理**（已修，B3）、**没有硬件解码**（待 P0-4）、缩放只剩 SDL 的双线性采样（待 P2-1） | 色彩：**已修复（B3）**；硬解：待做 | `player.cpp` 色彩段（原 553-578）；全仓无 `AVHWDeviceType` |
+| 4 | 渲染/解码链路**没有色彩管理**（已修，B3）、**没有硬件解码**（P0-4a 已接入，2026-09-12）、缩放只剩 SDL 的双线性采样（待 P2-1） | 色彩：**已修复（B3）**；硬解：**已接入（B4a）**，但仍是"半零拷贝"、4K 瓶颈已转移到上传路径 | `player.cpp` 色彩段；`openVideoCodec()` 的 D3D11VA 分支 |
 | 5 | "黑屏无画面"：**已复现并修复**。真因不是时序竞争，而是 `Player::open()` 漏复位 `demuxFinished_`/`drainSent_` —— 同一进程里换片时 demux 线程一个包都不读，`finished()` 当场为真把主时钟冻在 0 ⇒ **必然永久黑屏**（控制通道 `player.open`、插件 `open_media` 都会命中） | **已修复（B2，2026-09-12）**；曾用注释掉两行复位复现 | 修复记录与证据见 §4 P0-2；回归用例 `--selftest` 的 `reopen_media` |
 | 6 | 依赖侧**已经具备**升级条件：随包 SDL3 3.4.16 支持 NV12 纹理、YCbCr 矩阵、D3D11 外部设备复用；FFmpeg 9.0.1 头文件带 `BindFlags`。零拷贝硬解路线可行 | **已核验** | `vendor/sdl3/include/SDL3/SDL_render.h:565,814`、`SDL_pixels.h:670,1066`、`vendor/ffmpeg/include/libavutil/hwcontext_d3d11va.h:103,166,174` |
 
@@ -383,15 +383,61 @@ swscale 对 `yuv420p`(有限) 与 `yuvj420p`(全范围) 的默认处理是对的
 按 SDR 处理（过曝或发灰）。那属于 P2-3 的色调映射范围，且需要先有 GPU 管线；已写进
 README「已知限制」。
 
-#### P0-4 硬件解码 + NV12/零拷贝 + 上传路径
-- **改**：
-  1. `openVideoCodec()`（`player.cpp:262`）加 `get_format` 回调 + `av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_D3D11VA)`；失败则**自动回退软解**并打 INFO。
-  2. **设备复用**：`SDL_PROP_RENDERER_D3D11_DEVICE_POINTER`（`vendor/sdl3/include/SDL3/SDL_render.h:565`）拿到 SDL 的 `ID3D11Device`，交给 `AVD3D11VADeviceContext.device`；并设 `BindFlags |= D3D11_BIND_SHADER_RESOURCE`（`hwcontext_d3d11va.h:103`）——否则 SDL 用不了这块纹理。**参考实现：SDL3 官方 `test/testffmpeg.c`（D3D11 零拷贝解码+显示），这是官方走过的路。**
-  3. 渲染改为 `SDL_PIXELFORMAT_NV12` 纹理 + `SDL_SetTextureColorSpace`；无硬解时把 `sws_scale` 目标从 RGBA 改成 NV12（带宽降到 1/2.67）。
-  4. GPU 纹理用 `SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER`（`SDL_render.h:814`）直接包外部纹理实现真零拷贝；拿不到就走 `SDL_UpdateTexture` 的 NV12 上传。
-  5. `VIDEO_QUEUE_MAX_FRAMES` 按分辨率自适应（例如 4K 提到 24–32）。
-- **风险（必须实测）**：SDL3 在 2025-12-05 修过一批 "YUV texture updates in the 2D renderer" 的问题（涉及 d3d11/d3d12/gpu/vulkan 四个后端）。**随包的 3.4.16 是否已含该修复需要实测确认**；若不含有两个选择：升级 SDL3，或在 NV12 上传路径上自己写 staging 上传。这是本项第一个必做的验证。
-- **验收**：4K HEVC 素材上 `--selftest` 的 `decoded` 与 `displayed` 接近、`dropped` 显著下降；任务管理器 CPU 占用明显下降；`objdump -p` 确认新增依赖；`fetch_deps.py --check-update` + `gen_third_party_notices.py` 若换 SDL3 版本需重跑。
+#### P0-4 硬件解码 + NV12/零拷贝 + 上传路径 —— **部分完成（2026-09-12，B4）**
+
+拆成三小步做，**做一步测一步**；每一步都以实测数据决定去留。
+
+**P0-4a 接入 D3D11VA 硬解 —— 已完成并保留** ✅
+
+- `openVideoCodec()`：`av_hwdevice_ctx_create(D3D11VA)` → `hw_device_ctx` + `get_format`
+  回调；解码帧为 `AV_PIX_FMT_D3D11` 时 `av_hwframe_transfer_data()` 下载回内存。
+  任何一步失败都自动退回软解（只打 INFO）。`PP_NO_HWDEC=1` 可强制软解（A/B 用）。
+- `pickHwFormat()` 的**回退必须是软件格式**：候选列表可能全是硬件格式，
+  照抄 `fmt[0]` 会让解码器拿到输出不了的格式。已按 `AV_PIX_FMT_FLAG_HWACCEL` 过滤。
+- 状态可观测：日志 `硬件解码已生效: d3d11va`；`player.info` / `player.stats` 加 `hwdec`
+  字段（**没有动 ABI** —— 走的是 control.cpp 自己拼的 JSON）。
+- **实测（A/B，同一二进制切 `PP_NO_HWDEC`）**：见 README 验证结果 §16。
+  摘要：**丢帧显著减少**（1080p60 22→6、4K 300 帧 37→11）；**CPU 只在软解最贵的
+  场景才降**（4K HEVC 10bit 19.2→12.8 s，−33%），H.264 反而升高（下载+拷贝的代价）。
+  **"硬解一定省 CPU"是错的，必须按素材分别看。**
+
+**P0-4b NV12 纹理 + GPU 做 YUV→RGB —— 实现过、实测是净损失、已回退** ❌→回退
+
+- 做法：解码输出改 NV12、纹理改 `SDL_PIXELFORMAT_NV12`、按需把 NV12 物化成 RGBA 给插件。
+- **实测结果：`displayed` 300→243、`dropped` 11→78（4K），全面变差。**
+- 原因（**这是本轮最有价值的发现**）：`video_effects` / `snapshot` **启动时即注册帧处理器**，
+  于是"有插件要改像素"恒成立、NV12 快路径**永远走不到**，反而每帧多一次 NV12→RGBA 物化。
+  **快路径要生效，前提是插件"不启用时不占帧链"。**
+- 顺手得到两条**可复用的事实**（已实测，记在 README §16 与 `util.h` 注释里）：
+  ① SDL 3.4.16 的 NV12 纹理可用，且 `SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER`
+  确实生效（同一 YUV 按 601/709 建纹理 → 读出 `(202,10,32)`/`(219,30,30)`，
+  与 swscale 逐级一致）；② 3.4.16 **没有** `SDL_SetTextureColorSpace`，色彩空间只能在
+  建纹理时给；NV12 纹理的默认 colorspace 是 `SDL_COLORSPACE_JPEG`（全范围 BT.601），
+  不显式设置就是错色。SDLK 的取值表已抄进 `util.h` 的注释备查。
+- 完整实现留在补丁里：`_b4_nv12_attempt.patch`（工作区，未入库）。
+
+**P0-4b' 让插件按需占帧链 —— 下一批的前提（未做）**
+
+`video_effects` / `snapshot` 的帧处理器目前是 `on_start` 注册、`on_stop` 撤销，
+无论是否启用都常驻链上。改成"启用才注册、停用即撤销"，链在默认状态下为空 ——
+这既是**性能修复**（每帧省两次空回调），也是 **NV12 快路径能生效的前提**。
+做完这一步再重测 NV12 路线的性能，才有意义。
+
+**P0-4c 真零拷贝 —— 未做**
+
+把 `ID3D11Texture2D` 直接包成 SDL 纹理（`SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER`），
+要求 FFmpeg 与 SDL **共用同一个 D3D11 设备**
+（`SDL_PROP_RENDERER_D3D11_DEVICE_POINTER` + `D3D11_BIND_SHADER_RESOURCE`）。
+这是让硬解普遍划算的唯一途径，但改动面最大、也最难在本机验证部分失败场景，
+**没有在本轮动**。SDL3 官方 `test/testffmpeg.c` 是官方参考实现。
+
+**验收口径的修正（重要）**
+
+初版写的是"4K HEVC 上 `decoded≈displayed`、`dropped` 下降"。
+实测后发现 `dropped` 确实下降 ✓，但 **4K 上自检整体仍判 FAIL** ——
+瓶颈已经从"解码"转移到"主线程每帧工作量"（4K RGBA 纹理上传 = 33 MB/帧）。
+所以正确的验收口径应拆成两条：①`dropped` 是否下降（硬解负责）；②主线程是否跟得上
+（上传路径负责，需要 NV12 或零拷贝）。**把两件事混在一个数字里会得出错误结论。**
 
 ### P1 —— 能力扩展 + 插件化功能
 
@@ -488,7 +534,7 @@ README「已知限制」。
 | **B1** | P0-1（证据链修复 + 加严断言）→ 立刻给出"修复前/修复后"对比图 | `verify.py` + `verify.py --selfcheck` + 单测 |
 | **B2** | ~~P0-2 复现 → 修复 → 固化回归用例~~ **已完成 2026-09-12** | `verify.py` 18/18 + `--selftest` 11/11 + 控制通道两路取证 |
 | **B3** | ~~P0-3 色彩管理~~ **已完成 2026-09-12**（实测后收敛为"矩阵 + 容器标注"；范围本来就对） | `tests/color_check.py` 5/5 + 单测 89/89 + `verify.py` 18/18 |
-| **B4** | P0-4 硬解 + 零拷贝（含 SDL3 NV12 前置验证） | 同上 + 4K 实测数据 |
+| **B4** | ~~P0-4 硬解 + 零拷贝~~ **部分完成 2026-09-12**：4a 硬解已接入并保留；4b（NV12 纹理）实测净损失、已回退；4b'（插件按需占帧链）与 4c（真零拷贝）待做 | 自检 11/11 + 色彩 5/5 + A/B 基准 + `verify.py` 18/18 |
 | **B5** | ABI v3 一次性落地（把 P1-1/P1-2/P1-4 需要的新能力一起加，避免多次重编全部插件） | `verify.py --selfcheck` + `--apitest` |
 | **B6** | P1-1 真字体 OSD / P1-2 鼠标通道 / P1-4 多轨与设备 | 同上 |
 | **B7** | P1-3 字幕插件（先轻路线打通，再上 libass） | 同上 + 字幕用例 |

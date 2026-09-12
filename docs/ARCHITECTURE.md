@@ -70,6 +70,37 @@ SDL 音频流…）只被一个线程触碰。
 （早期版本让 RPC 线程直接调用宿主 API，JS 宿主每 5 秒轮询一次 stats 就会与主循环并发
 改写这些字段 —— 是一处真实的数据竞争。）
 
+## 2b. 硬件解码（D3D11VA）
+
+只在 `openVideoCodec()` 里尝试，**任何一步失败都不报错，只打日志并自动退回软解** ——
+"能硬解就硬解、不能就软解"必须是自带的，不能让用户去配。
+
+```
+av_hwdevice_ctx_create(D3D11VA) → vCtx_->hw_device_ctx = av_buffer_ref(...)
+                                → vCtx_->get_format = Player::hwGetFormatCb
+解码线程：receive_frame → 帧格式是 AV_PIX_FMT_D3D11 → av_hwframe_transfer_data(→ NV12)
+```
+
+要点：
+
+- **`get_format` 必须给出可用的回退**。候选列表里可能全是硬件格式，若照抄 `fmt[0]`
+  而当硬件不可用，解码器会拿到一个它输出不了的格式，之后每帧都失败。
+  `pickHwFormat()` 在找不到目标硬件格式时**挑第一个软件格式**（校验
+  `AV_PIX_FMT_FLAG_HWACCEL` 位）。
+- **"半零拷贝"**：解码在 GPU，`av_hwframe_transfer_data()` 把帧下载回系统内存（NV12），
+  之后的色彩转换/上传照旧。真正的零拷贝（把 `ID3D11Texture2D` 直接包成 SDL 纹理）
+  要求 FFmpeg 与 SDL 共用同一个 D3D11 设备，改动面更大，**尚未做**。
+- **可选关闭**：环境变量 `PP_NO_HWDEC=1`（与 `PP_WEB_REMOTE` / `PP_RPC_TOKEN` 同款惯例），
+  用于排障与 A/B —— 硬解出问题时能一键确认"是不是硬解的锅"。
+- 状态可观测：日志里 `硬件解码已生效: d3d11va（帧格式 d3d11 → 下载为 nv12）`，
+  控制通道的 `player.info` / `player.stats` 里也有 `hwdec` 字段（空串 = 软解）。
+
+**为什么这是"半"零拷贝、以及实测的性能账**（详见 README 验证结果 §16）：
+下载回内存这一步在 4K 下要拷 ~12 MB/帧。实测硬解**显著减少丢帧**
+（1080p60：22 → 6；4K 300 帧：37 → 11），但 **CPU 只在软解最贵的场景才降**
+（4K HEVC 10bit：19.2 s → 12.8 s），H.264 上反而升高（6.0 s → 8.6 s）——
+因为省下的解码时间抵不过下载+拷贝。**要让硬解普遍划算，必须走到零拷贝。**
+
 ## 3. A/V 同步
 
 - **音频时钟**：`ringBasePts + consumedBytes / bytesPerSec`。
