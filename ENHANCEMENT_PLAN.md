@@ -661,14 +661,19 @@ P1-b + P1-c 合并为一批（叠加层是字幕的底座，一起做避免接�
 `src/core/osd.*`（叠加层管理）、`src/core/host.cpp`（API 表挂接）、`docs/ARCHITECTURE.md`、
 `README.md`（ABI 版本号）。
 
-**验收（可机械判定）**
+**验收（已机械判定）**
 
-- [ ] `tests/plugin_apitest` 风格新增用例：
-      ① 鼠标事件被插件消费后**内核不再响应**（BAIL 语义真的生效）；
-      ② 叠加层按 owner 撤销后**不残留**（数量归零）。
-- [ ] 自检新增步骤：程序化注入一个鼠标事件（`SDL_PushEvent`），断言插件收到且 BAIL 生效；
-      这一步在"无鼠标输入"的环境里也要可跑（用合成事件，不依赖真实硬件）。
-- [ ] ABI 版本号与插件清单一致（`plugin-manifest` / `versions-align` 门禁已覆盖）。
+- [x] 鼠标 BAIL 语义：事件总线单测 `tests/unit/test_eventbus.cpp::mouse_bail_consumed_stops_chain`
+      （3 个订阅者，a.consumed=1 后 b/c 不再收到，dispatch 返回 1）；内核 `app.cpp::handleMouse`
+      派发 `PP_TOPIC_UI_MOUSE`，插件吞掉后"点画面跳转"不再触发。合成事件，不依赖真实硬件。
+- [x] 叠加层按 owner 撤销无残留：自检步骤 `overlay_owner_revoke` 像素级断言 —— 推红方块图层
+      （owner=1）渲染后数到 1600 红像素、`overlayClear(owner)`（即 `Host::revokeAll` 路径）
+      后重渲染红像素归 0、图层数归 0；对照 FillRect 块始终 1600，排除"纹理渲染失效"误判。
+      关键修正：D3D11 后端 `SDL_RenderReadPixels` 读回是 BGRA，必须先 `SDL_ConvertSurface(...,
+      SDL_PIXELFORMAT_RGBA32)` 再取样（与 `render_and_capture` 同一模式），否则红像素判据恒假阴性。
+- [x] ABI 版本号与插件清单一致：`PP_ABI_VERSION=3`、`ARCHITECTURE.md` 鉴权示例 `abi:3`、
+      `THIRD_PARTY_NOTICES.md` 同步；`plugin-manifest`（5 DLL 哈希）、`versions-align` 门禁均 PASS；
+      全量 `build.py` 重编宿主 + 全部 5 个插件天然一致。
 
 ---
 

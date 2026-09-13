@@ -50,7 +50,7 @@ F:\Python314\python.exe build.py
 F:\Python314\python.exe build.py --smoke
 
 :: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
-::     实测产物 18 个文件 / 129 MB（不带 --release 时 dist/ 会累积日志与自检证据）
+::     实测产物 19 个文件 / 129 MB（不带 --release 时 dist/ 会累积日志与自检证据）
 F:\Python314\python.exe build.py --release
 
 :: 3) 播放（把视频拖到 run.bat 上，或：）
@@ -589,7 +589,7 @@ pluginplayer/
 [OK] 已删除 build/ 与 dist/          ← 先干净重建（否则会继承上一轮的残留）
 [OK] 已生成 plugins/manifest.sha256（5 个插件）
 [OK] 已生成 run.bat、selftest.bat、start-dsh.bat 与 ci.bat（纯 ASCII，CRLF）
-[release] 可发布文件 17 个，合计 127.0 MB
+[release] 可发布文件 19 个，合计 128.6 MB
 ```
 
 对比：不带 `--release` 的 `dist/` 会累积到 **306 MB**（含 `logs/`、`selftest_out*/`、
@@ -647,7 +647,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] plugin-command-count 注册 15 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
 [PASS] native-plugin-set    5 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
 [PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
-[PASS] release-payload      18 个文件 / 128.6 MB，与 README 的 18 / 129 MB 一致
+[PASS] release-payload      19 个文件 / 128.6 MB，与 README 的 19 / 129 MB 一致
 [PASS] portable-modules     20 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
 [PASS] no-credentials       82 个文本文件已扫描，未发现硬编码凭据
 [PASS] arg-bounds-align     13 项边界与 C++ 源码一致
@@ -1114,7 +1114,7 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
   不验证"解出来的像素对不对"）—— 那需要参考帧比对，目前没做。内核与插件的回归仍靠
   `--selftest` / `--smoke` / `--apitest` 三个入口，是"最小入口"而不是完整测试网。
 - **命令行接口不随 `dist/` 发布**：`tools/pp_cli.py` 是仓库侧的运维工具，
-  靠 `install-cli` 装进 PATH 目录。`dist/` 保持"18 个文件 / 128.6 MB"的干净载荷，
+  靠 `install-cli` 装进 PATH 目录。`dist/` 保持"19 个文件 / 128.6 MB"的干净载荷，
   口径与 `build.py --release` 一致（把 CLI 塞进去会让这个口径失真）。
   `pluginplayer.cmd` / `pp.cmd` 是生成物但**纳入版本控制** ——
   这样 clone 下来不带 PATH 也能用，且行尾契约由 `.gitattributes` 钉住。

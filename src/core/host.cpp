@@ -84,6 +84,7 @@ int Host::revokeAll(int owner) {
                      frameSubs_.end());
     dropSubsOf(owner);
     bus_.clearTopicModesOf(owner);       /* 插件声明的自定义主题模式一并撤销 */
+    if (app_) n += app_->overlayClear(owner);   /* P1-b：插件卸载自动清掉它的图层 */
     return n;
 }
 
@@ -451,6 +452,41 @@ static void api_remove_frame_processor(PP_Host* h, int id) {
 /* ---- OSD ---- */
 static const PP_OsdApi* api_osd() { return Osd::cApi(); }
 
+/* ---- P1-b 通用叠加层 ---- */
+static int api_overlay_set(PP_Host* h, int id, const uint8_t* rgba, int w, int hgt,
+                           float x, float y, float dw, float dh, float alpha) {
+    App* A = HOST(h)->app();
+    if (!A || !rgba || w <= 0 || hgt <= 0) return 0;
+    return A->overlaySet(HOST(h)->owner(), id, rgba, w, hgt, x, y, dw, dh, alpha);
+}
+static int api_overlay_move(PP_Host* h, int id, float x, float y, float dw, float dh, float alpha) {
+    App* A = HOST(h)->app();
+    if (!A) return 0;
+    return A->overlayMove(HOST(h)->owner(), id, x, y, dw, dh, alpha);
+}
+static int api_overlay_visible(PP_Host* h, int id, int visible) {
+    App* A = HOST(h)->app();
+    if (!A) return 0;
+    return A->overlayVisible(HOST(h)->owner(), id, visible != 0);
+}
+static int api_overlay_remove(PP_Host* h, int id) {
+    App* A = HOST(h)->app();
+    if (!A) return 0;
+    return A->overlayRemove(HOST(h)->owner(), id);
+}
+static int api_overlay_clear(PP_Host* h) {
+    App* A = HOST(h)->app();
+    if (!A) return 0;
+    return A->overlayClear(HOST(h)->owner());
+}
+static const PP_OverlayApi* api_overlay() {
+    static const PP_OverlayApi api = {
+        &api_overlay_set, &api_overlay_move, &api_overlay_visible,
+        &api_overlay_remove, &api_overlay_clear,
+    };
+    return &api;
+}
+
 /* ---- 配置 ---- */
 static const char* api_config_get(PP_Host* h, const char* key, const char* def) {
     Host* H = HOST(h);
@@ -573,6 +609,7 @@ void Host::buildApi() {
     api_.remove_frame_processor = &api_remove_frame_processor;
 
     api_.osd = api_osd();
+    api_.overlay = api_overlay();       /* P1-b 通用叠加层 */
 
     api_.config_get = &api_config_get;
     api_.config_set = &api_config_set;

@@ -65,9 +65,12 @@ extern "C" {
  *    这需要改掉**所有**调用点（插件里 7 处以上），收益有限、回归面不小，
  *    因此当前版本刻意不做 —— 记录在此，供将来决策。
  *
- * 5) 当前状态：`PP_ABI_VERSION = 2`，宿主与插件必须来自同一份头文件。
+ * 5) 当前状态：`PP_ABI_VERSION = 3`，宿主与插件必须来自同一份头文件。
  *    构建脚本 `build.py` 会一起编译宿主与全部插件，所以这在发布流程里是自然的。
  *    v2 的变更：`PP_OsdApi` 追加 `video_rect`（OSD 避让画面黑边，见该字段注释）。
+ *    v3 的变更：新增 `PP_MouseEvent`（鼠标事件负载）与 `PP_OverlayApi`
+ *              （插件自定义位图叠加层），`PP_HostApi` 追加 `overlay` 字段 ——
+ *              追加在**末尾**，旧插件靠 `struct_size` 判断字段可用性（见上文第 2 节）。
  * ===========================================================================
  */
 
@@ -75,7 +78,7 @@ extern "C" {
  * 版本与导出宏
  * =========================================================================== */
 
-#define PP_ABI_VERSION 2u
+#define PP_ABI_VERSION 3u
 
 /** 插件必须导出的入口符号名（见文件末 PP_PLUGIN_DECL）。 */
 #define PP_PLUGIN_ENTRY "pp_plugin_query"
@@ -271,7 +274,9 @@ typedef int (*PP_FrameFn)(PP_Host *host, PP_FrameView *view, void *user);
  * 所有调用只在 osd.draw 事件（或 PP_TOPIC_OSD_DRAW 回调）期间有效。
  * =========================================================================== */
 typedef struct PP_OsdApi {
-    /** 文字（内置 8x8 点阵字体，支持可打印 ASCII；非 ASCII 以 '?' 呈现）。 */
+    /** 文字。**默认走真字体**（stb_truetype 解析随包 TTF；可用 `PP_FONT` 环境变量
+     *  换字体），支持任意 UTF-8 含中文；字体缺失时才回退 SDL 内置 8x8 点阵字，
+     *  那种情况下非 ASCII 会以 '?' 呈现。两种情况下 `text_width` 都返回真实像素宽度。 */
     void  (*text)(PP_Host *host, float x, float y, const char *utf8, PP_Color color, float scale);
     float (*text_width)(PP_Host *host, const char *utf8, float scale);
     float (*line_height)(PP_Host *host, float scale);
@@ -293,6 +298,52 @@ typedef struct PP_OsdApi {
     int   (*video_rect)(PP_Host *host, float *out_x, float *out_y,
                         float *out_w, float *out_h);
 } PP_OsdApi;
+
+/* ===========================================================================
+ * P1-b 鼠标事件（PP_TOPIC_UI_MOUSE 的负载）
+ * ===========================================================================
+ * 分发模式是 **BAIL**：插件返回非 0 即"吞掉"该事件，宿主不再执行内置响应
+ * （当前内置响应只有"点击进度条跳转"），语义与 `PP_TOPIC_UI_KEY` 一致。
+ * 主题的分发模式在内核里已登记（eventbus.cpp 的 topic 表），插件不必再声明。 */
+typedef struct PP_MouseEvent {
+    int    type;      /* 0=移动 1=按下 2=抬起 3=滚轮 */
+    float  x, y;      /* 窗口客户区坐标（像素，左上角为原点） */
+    float  dx, dy;    /* 移动：相对上次位移；滚轮：滚动量（y 正为向前） */
+    int    button;    /* 1=左 2=中 3=右（按下/抬起有效，其余为 0） */
+    int    clicks;    /* 连击数（按下有效） */
+    int    mod;       /* 修饰键位掩码：1=Shift 2=Ctrl 4=Alt */
+    double pts;       /* 事件发生时的主时钟位置（秒），便于插件做与时间相关的交互 */
+} PP_MouseEvent;
+
+/* 便于插件书写（枚举不是 ABI 的一部分，数值才是） */
+enum { PP_MOUSE_MOTION = 0, PP_MOUSE_DOWN = 1, PP_MOUSE_UP = 2, PP_MOUSE_WHEEL = 3 };
+enum { PP_MOD_SHIFT = 1, PP_MOD_CTRL = 2, PP_MOD_ALT = 4 };
+
+/* ===========================================================================
+ * P1-b 通用叠加层
+ * ===========================================================================
+ * 让插件把自己的**位图**叠到画面上（字幕、弹幕、水印、缩略图预览都建在这上面），
+ * 内核只负责保管与合成，不解释内容 —— 与"一切皆插件"的架构红线一致。
+ *
+ * 生命周期：`set` 返回的 id 由内核分配；**插件卸载时该插件的图层会被自动清除**
+ * （Host::revokeAll 按 owner 清理），所以正常路径下插件不必显式 remove；
+ * 显式 remove/hide 用于运行期切换。
+ *
+ * 像素格式固定 RGBA8888、行优先，pitch == w*4（不接受到处传 pitch 的复杂度 ——
+ * 这里的图层尺寸通常远小于视频帧，按紧密排布拷贝一次即可）。 */
+typedef struct PP_OverlayApi {
+    /** 新建或更新一个图层的像素与摆放。id 传 0 表示新建（返回新 id）。
+     *  rgba 为 w*h*4 字节，会被**拷贝**（内核持有自己的纹理）。
+     *  dw/dh <= 0 时按图像原始尺寸摆放。返回 id（>0），失败返回 0。 */
+    int   (*set)(PP_Host *h, int id, const uint8_t *rgba, int w, int hgt,
+                 float x, float y, float dw, float dh, float alpha);
+    /** 只改摆放/透明度，不动像素（每帧更新的场合用它，避免重复拷像素）。 */
+    int   (*move)(PP_Host *h, int id, float x, float y, float dw, float dh, float alpha);
+    int   (*set_visible)(PP_Host *h, int id, int visible);
+    int   (*remove)(PP_Host *h, int id);
+    /** 移除当前插件（调用方）的全部图层。 */
+    int   (*clear)(PP_Host *h);
+} PP_OverlayApi;
 
 /* ===========================================================================
  * 宿主能力表
@@ -368,6 +419,9 @@ typedef struct PP_HostApi {
 
     /* -- OSD ---------------------------------------------------------------- */
     const PP_OsdApi *osd;
+    /* v3：通用位图叠加层（字幕/弹幕/水印/预览的底座）。
+     * 追加在 osd 之后；旧插件用 struct_size 判断该字段是否可用。 */
+    const PP_OverlayApi *overlay;
 
     /* -- 配置持久化（config/pluginplayer.ini） ------------------------------- */
     const char  *(*config_get)(PP_Host *h, const char *key, const char *def);

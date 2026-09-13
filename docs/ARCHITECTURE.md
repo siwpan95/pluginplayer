@@ -309,7 +309,7 @@ int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
 
 ```
 → {"id":1,"method":"auth","params":{"token":"<64 位 hex>"}}        ← 必须是第一条
-← {"id":1,"ok":true,"result":{"authenticated":true,"abi":2}}
+← {"id":1,"ok":true,"result":{"authenticated":true,"abi":3}}
 
 → {"id":2,"method":"player.seek","params":{"seconds":12}}
 ← {"id":2,"ok":true,"result":{"position":12.0}}
@@ -352,6 +352,16 @@ int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
   上下黑边**，黑边不足时退回原位。两个插件在底部的空间靠约定协调（底部 48px 归
   进度条，见两边同名注释）。渲染几何一律按 `SDL_GetWindowSizeInPixels` 的**渲染像素**
   计算 —— 用窗口逻辑尺寸在高 DPI 下会让右/下侧 OSD 被整块裁掉（实测过的缺陷）。
+- **鼠标事件通道（ABI v3）**：内核在 `pollEvents()` 从 SDL 取出
+  `SDL_EVENT_MOUSE_MOTION / _BUTTON_DOWN / _BUTTON_UP / _WHEEL`，构造 `PP_MouseEvent`
+  （type/x/y/dx/dy/button/clicks/mod/pts）经 `PP_TOPIC_UI_MOUSE`（**BAIL** 模式）派发到总线。
+  插件把 `consumed` 置 1 即"吞掉"该事件，内核的"点画面跳转"等内置响应随之让位 ——
+  即"插件接管交互，内核退居能力层"。
+- **通用叠加层（ABI v3）**：插件经 `PP_OverlayApi`（`set/move/set_visible/remove/clear`）
+  推 RGBA8888 位图图层；内核只保管（`SDL_TEXTUREACCESS_STATIC` 纹理）与合成
+  （`renderOverlays()`，在 OSD 之上、Present 之下），**不解释内容** —— 与"一切皆插件"红线一致。
+  图层按 `owner` 归属；宿主 `Host::revokeAll(owner)` 在插件卸载时调 `overlayClear(owner)`，
+  自动清掉它的全部图层，因此"插件卸载不残留画面"由机制而非约定保证。
 
 ## 8b. 信任边界与写入白名单
 

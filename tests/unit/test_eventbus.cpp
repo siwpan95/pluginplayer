@@ -205,6 +205,36 @@ PP_TEST(eventbus, bail_consumed_stops_chain) {
     PP_EQ(e.seen.size(), (size_t)1);
 }
 
+PP_TEST(eventbus, mouse_bail_consumed_stops_chain) {
+    /* P1-b 契约：鼠标事件先给插件（BAIL）。插件吞掉后，内核的"内置响应"
+     * （点画面跳转）必须不再触发 —— 否则同一个点击既被插件处理又被内核跳转，
+     * 表现就是"点了按钮却跳进度"。这条与按键的 BAIL 是同一套机制，但鼠标是
+     * 新加的主题，单独钉一次防止回归。 */
+    EventBus bus;
+    Recorder a, b, c;
+    a.consumed = 1;
+    bus.subscribe(PP_TOPIC_UI_MOUSE, &Recorder::fn, &a, 1);
+    bus.subscribe(PP_TOPIC_UI_MOUSE, &Recorder::fn, &b, 2);
+    bus.subscribe(PP_TOPIC_UI_MOUSE, &Recorder::fn, &c, 3);
+
+    PP_MouseEvent me{};
+    me.type = PP_MOUSE_DOWN; me.button = 1; me.x = 100; me.y = 50;
+    PP_EQ(bus.dispatch(nullptr, PP_TOPIC_UI_MOUSE, &me, (int)sizeof(me)), 1);
+    PP_EQ(a.seen.size(), (size_t)1);
+    PP_CHECK_MSG(b.seen.empty(), "鼠标被插件消费后，后续插件不该再收到");
+    PP_CHECK_MSG(c.seen.empty(), "同上");
+    PP_EQ(a.seen_mode, PP_DISPATCH_BAIL);
+
+    /* 没人吞：全链跑完返回 0 */
+    Recorder d, e;
+    EventBus bus2;
+    bus2.subscribe(PP_TOPIC_UI_MOUSE, &Recorder::fn, &d, 1);
+    bus2.subscribe(PP_TOPIC_UI_MOUSE, &Recorder::fn, &e, 2);
+    PP_EQ(bus2.dispatch(nullptr, PP_TOPIC_UI_MOUSE, &me, (int)sizeof(me)), 0);
+    PP_EQ(d.seen.size(), (size_t)1);
+    PP_EQ(e.seen.size(), (size_t)1);
+}
+
 PP_TEST(eventbus, serial_returns_first_nonzero) {
     EventBus bus;
     Recorder a, b, c;

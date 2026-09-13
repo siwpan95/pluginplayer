@@ -59,6 +59,8 @@ private:
     /* 主循环分步 */
     void pollEvents();
     void handleKey(const SDL_Event& e);
+    /** P1-b：鼠标事件先给插件（BAIL，插件可吞掉），再走内置的"点画面跳转"。 */
+    void handleMouse(const SDL_Event& e);
     /** 取当前帧 → 跑帧处理链 → 上传到纹理。返回**是否真的上传成功**。
      *  force=true 跳过"同一帧不重复上传"的去重，供自检抓屏使用（那时的当前帧
      *  可能已经被别人"看过"、但屏幕上一次都没画过）。调用方必须保证同一帧
@@ -83,6 +85,29 @@ private:
     static void SDLCALL audioCallback(void* userdata, SDL_AudioStream* stream,
                                       int additional, int total);
 
+    /* P1-b 通用叠加层：插件推位图，内核只保管与合成（功能仍全在插件里）。
+     * owner 用于"插件卸载时自动清干净"，与 registry 的撤销口径一致。
+     * 这些方法对 Host 公开：宿主要把插件的 overlay API 调用转派到 App。 */
+public:
+    struct Overlay {
+        int          id = 0;
+        int          owner = 0;
+        SDL_Texture* tex = nullptr;
+        int          w = 0, h = 0;
+        float        x = 0, y = 0, dw = 0, dh = 0, alpha = 1.0f;
+        bool         visible = true;
+    };
+    int  overlaySet(int owner, int id, const uint8_t* rgba, int w, int h,
+                    float x, float y, float dw, float dh, float alpha);
+    int  overlayMove(int owner, int id, float x, float y, float dw, float dh, float alpha);
+    int  overlayVisible(int owner, int id, bool visible);
+    int  overlayRemove(int owner, int id);
+    int  overlayClear(int owner);
+    int  overlayCount() const { return (int)overlays_.size(); }
+    void renderOverlays();             /* 在 OSD 之后、Present 之前合成 */
+    void clearAllOverlays();
+
+private:
     /* 工具 */
     void publishEvent(const char* topic, const char* json);
     void invokeOrLog(const char* cmd, int argc, const char** argv);
@@ -99,6 +124,8 @@ private:
     bool               texCsFellBackWarned_ = false;
     /* PP_NO_NV12=1：强制 RGBA 上传路径（同一二进制上的 A/B 基准开关，见 pumpAndUpload） */
     bool               forceRgba_ = false;
+    std::vector<Overlay> overlays_;      /* P1-b 插件叠加层 */
+    int                nextOverlayId_ = 1;
     int                winW_ = 1280, winH_ = 720;
     bool               hidden_ = false;
     bool               audioEnabled_ = true;

@@ -31,7 +31,7 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 | Cordis / @cordisjs/plugin-loader | @cordisjs/plugin-loader 1.0.0-rc.6, cordis 4.0.0-rc.9 | MIT | https://www.npmjs.com/package/cordis |
 | MinGW-w64 GCC 运行时 | GCC 16.1.0 | GPL v3 + GCC Runtime Library Exception | https://www.mingw-w64.org/ |
 
-插件 ABI 版本：`PP_ABI_VERSION = 2`（`src/sdk/player_plugin.h`）。
+插件 ABI 版本：`PP_ABI_VERSION = 3`（`src/sdk/player_plugin.h`）。
 
 ### FFmpeg —— 随包文件与来源
 
@@ -87,13 +87,14 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 
 | 文件 |
 |---|
+| `assets/fonts/SOURCES.md` |
 | `assets/fonts/ZCOOLKuaiLe-Regular.ttf` |
 | `config/pluginplayer.ini` |
 | `pluginplayer.exe` |
 
 ### `dist/` 载荷
 
-发布载荷共 **18 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
+发布载荷共 **19 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
 
 ## 开发期使用、但不随发布物分发
 

@@ -289,6 +289,13 @@ void App::pollEvents() {
             case SDL_EVENT_KEY_UP:
                 handleKey(e);
                 break;
+            /* P1-b 鼠标事件：与键盘同款，先给插件（BAIL，插件可吞掉） */
+            case SDL_EVENT_MOUSE_MOTION:
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+            case SDL_EVENT_MOUSE_WHEEL:
+                handleMouse(e);
+                break;
             case SDL_EVENT_WINDOW_RESIZED:
                 winW_ = e.window.data1;
                 winH_ = e.window.data2;
@@ -300,6 +307,155 @@ void App::pollEvents() {
                 break;
         }
     }
+}
+
+/* P1-b：鼠标事件进插件链（BAIL）。被吞掉时不执行内置的"点进度条跳转"。 */
+void App::handleMouse(const SDL_Event& e) {
+    PP_MouseEvent me{};
+    switch (e.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+            me.type = PP_MOUSE_MOTION;
+            me.x = e.motion.x; me.y = e.motion.y;
+            me.dx = e.motion.xrel; me.dy = e.motion.yrel;
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            me.type = (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? PP_MOUSE_DOWN : PP_MOUSE_UP;
+            me.x = e.button.x; me.y = e.button.y;
+            /* SDL3 的 button 字段：1=左 2=中 3=右，与 PP_MouseEvent 口径一致 */
+            me.button = (int)e.button.button;
+            me.clicks = (int)e.button.clicks;
+            break;
+        }
+        case SDL_EVENT_MOUSE_WHEEL:
+            me.type = PP_MOUSE_WHEEL;
+            me.x = e.wheel.mouse_x; me.y = e.wheel.mouse_y;
+            me.dx = e.wheel.x; me.dy = e.wheel.y;
+            break;
+        default:
+            return;
+    }
+    me.mod = 0;
+    if (e.type != SDL_EVENT_MOUSE_WHEEL) {
+        SDL_Keymod m = SDL_GetModState();
+        if (m & SDL_KMOD_SHIFT) me.mod |= PP_MOD_SHIFT;
+        if (m & SDL_KMOD_CTRL)  me.mod |= PP_MOD_CTRL;
+        if (m & SDL_KMOD_ALT)   me.mod |= PP_MOD_ALT;
+    }
+    me.pts = player_.isOpen() ? player_.masterClock() : 0.0;
+
+    int consumed = host_.bus().dispatch(host_.handle(), PP_TOPIC_UI_MOUSE, &me, (int)sizeof(me));
+    if (consumed) { PP_DEBUG("鼠标事件被插件消费: type=%d", me.type); return; }
+
+    /* 内置响应：左键点击画面区域 → 按横向位置跳转（与键盘一样是"能用"，不是"好用"） */
+    if (me.type == PP_MOUSE_DOWN && me.button == 1 && player_.isOpen() && player_.duration() > 0) {
+        if (videoRectValid_ && videoRectW_ > 0) {
+            float rel = (me.x - videoRectX_) / videoRectW_;
+            if (rel >= 0.0f && rel <= 1.0f) {
+                player_.seekAbsolute((double)rel * player_.duration());
+                publishEvent(PP_TOPIC_PLAY_SEEKED, "{}");
+            }
+        }
+    }
+}
+
+/* ---------------- P1-b 通用叠加层 ---------------- */
+
+static bool overlayBelongs(const App::Overlay& o, int owner, int id) {
+    return o.id == id && (owner == 0 || o.owner == owner);
+}
+
+int App::overlaySet(int owner, int id, const uint8_t* rgba, int w, int h,
+                    float x, float y, float dw, float dh, float alpha) {
+    if (!ren_ || !rgba || w <= 0 || h <= 0) return 0;
+    Overlay* o = nullptr;
+    for (auto& it : overlays_) {
+        if (overlayBelongs(it, owner, id)) { o = &it; break; }
+    }
+    if (!o) {
+        if (id != 0) return 0;            /* 指定的 id 不存在 */
+        overlays_.push_back(Overlay{});
+        o = &overlays_.back();
+        o->id = nextOverlayId_++;
+        o->owner = owner;
+    }
+    if (!o->tex || o->w != w || o->h != h) {
+        if (o->tex) SDL_DestroyTexture(o->tex);
+        o->tex = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_RGBA32,
+                                   SDL_TEXTUREACCESS_STATIC, w, h);
+        if (!o->tex) { PP_WARN("叠加层纹理创建失败: %s", SDL_GetError()); return 0; }
+        SDL_SetTextureBlendMode(o->tex, SDL_BLENDMODE_BLEND);
+        o->w = w; o->h = h;
+    }
+    if (!SDL_UpdateTexture(o->tex, nullptr, rgba, w * 4)) {
+        PP_WARN("叠加层像素上传失败: %s", SDL_GetError());
+        return 0;
+    }
+    o->x = x; o->y = y;
+    o->dw = dw > 0 ? dw : (float)w;
+    o->dh = dh > 0 ? dh : (float)h;
+    o->alpha = (alpha < 0.0f) ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+    o->visible = true;
+    return o->id;
+}
+
+int App::overlayMove(int owner, int id, float x, float y, float dw, float dh, float alpha) {
+    for (auto& o : overlays_) {
+        if (!overlayBelongs(o, owner, id)) continue;
+        o.x = x; o.y = y;
+        if (dw > 0) o.dw = dw;
+        if (dh > 0) o.dh = dh;
+        o.alpha = (alpha < 0.0f) ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+        return 1;
+    }
+    return 0;
+}
+
+int App::overlayVisible(int owner, int id, bool visible) {
+    for (auto& o : overlays_) {
+        if (!overlayBelongs(o, owner, id)) continue;
+        o.visible = visible;
+        return 1;
+    }
+    return 0;
+}
+
+int App::overlayRemove(int owner, int id) {
+    for (size_t i = 0; i < overlays_.size(); i++) {
+        if (!overlayBelongs(overlays_[i], owner, id)) continue;
+        if (overlays_[i].tex) SDL_DestroyTexture(overlays_[i].tex);
+        overlays_.erase(overlays_.begin() + i);
+        return 1;
+    }
+    return 0;
+}
+
+int App::overlayClear(int owner) {
+    int n = 0;
+    for (size_t i = 0; i < overlays_.size();) {
+        if (owner == 0 || overlays_[i].owner == owner) {
+            if (overlays_[i].tex) SDL_DestroyTexture(overlays_[i].tex);
+            overlays_.erase(overlays_.begin() + i);
+            n++;
+        } else i++;
+    }
+    return n;
+}
+
+void App::clearAllOverlays() {
+    for (auto& o : overlays_) if (o.tex) SDL_DestroyTexture(o.tex);
+    overlays_.clear();
+}
+
+void App::renderOverlays() {
+    if (!ren_ || overlays_.empty()) return;
+    for (auto& o : overlays_) {
+        if (!o.visible || !o.tex || o.alpha <= 0.0f) continue;
+        SDL_SetTextureAlphaMod(o.tex, (Uint8)(o.alpha * 255.0f));
+        SDL_FRect dst{o.x, o.y, o.dw, o.dh};
+        SDL_RenderTexture(ren_, o.tex, nullptr, &dst);
+    }
+    for (auto& o : overlays_) if (o.tex) SDL_SetTextureAlphaMod(o.tex, 255);
 }
 
 void App::handleKey(const SDL_Event& e) {
@@ -581,6 +737,9 @@ void App::renderFrame() {
         host_.emitOsdDraw();
         renderBuiltinOverlay();
         osd.end();
+        /* P1-b：插件叠加层在 OSD 之上、Present 之下合成。
+         * osdHidden_ 为真时连同内置 OSD 一起隐藏（见 app.h 注释语义）。 */
+        renderOverlays();
     }
 }
 
@@ -1062,6 +1221,78 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
                                diff, 30, inkCn, inkQ));
             }
         }
+    }
+
+    /* --- P1-b 通用叠加层：渲染 + owner 撤销不残留（像素级断言） ---
+     * 判据：推一个红色方块图层（owner=1）→ 渲染后该区域应出现红色像素；
+     * 调 overlayClear(owner) 后重渲染，红色像素必须归零、图层数归零。
+     * 这直接验证"插件卸载时内核自动清掉它的图层"这条架构红线（Host::revokeAll
+     * 走的就是 overlayClear(owner)），以及 overlay 真的被合成到画面。 */
+    {
+        const int OWNER = 1;
+        const int SIDE = 40;
+        const int OX = 80, OY = 80;
+        std::vector<uint8_t> px((size_t)SIDE * SIDE * 4, 0);
+        for (size_t i = 0; i < px.size(); i += 4) {
+            px[i] = 230; px[i + 1] = 30; px[i + 2] = 30; px[i + 3] = 255;   /* 红 */
+        }
+        int id = overlaySet(OWNER, 0, px.data(), SIDE, SIDE, (float)OX, (float)OY, 0, 0, 1.0f);
+        bool ok = (id > 0) && (overlayCount() == 1);
+        std::string detail;
+        if (!ok) {
+            detail = format("overlaySet 失败（id=%d, 图层数=%d）", id, overlayCount());
+        } else {
+            auto redIn = [this, OX, OY, SIDE](int& redTex, int& redCtrl) {
+                redTex = 0; redCtrl = 0;
+                SDL_SetRenderDrawColor(ren_, 16, 16, 20, 255);
+                SDL_RenderClear(ren_);
+                renderOverlays();                       /* 纹理叠加层（80,80） */
+                /* 对照：同一渲染器直接 FillRect 红方块（200,200），用于区分
+                 * "纹理渲染本身失效" 还是 "读回/区域判断失效"。 */
+                SDL_SetRenderDrawColor(ren_, 230, 30, 30, 255);
+                SDL_FRect ctrl{(float)(OX + 120), (float)OY, (float)SIDE, (float)SIDE};
+                SDL_RenderFillRect(ren_, &ctrl);
+                /* 读回必须发生在 Present 之前（与生产路径 renderFrame 末尾的 Present
+                 * 不同）—— Present 之后后备缓冲内容未定义，D3D11 上读回可能全黑。
+                 * 读回缓冲的字节序由后端决定（D3D11 本机实测是 BGRA），必须统一
+                 * 转成 SDL_PIXELFORMAT_RGBA32 再取样，否则会把 R 与 B 读反，导致
+                 * "纹理红=0 对照红=0" 的假阴性。该归一化与 render_and_capture 一致。 */
+                SDL_Surface* s = SDL_RenderReadPixels(ren_, nullptr);
+                SDL_RenderPresent(ren_);
+                if (!s) return false;
+                SDL_Surface* rgba = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32);
+                if (!rgba) { SDL_DestroySurface(s); return false; }
+                for (int y = OY; y < OY + SIDE && y < rgba->h; y++)
+                    for (int x = OX; x < OX + SIDE && x < rgba->w; x++) {
+                        const uint8_t* p = (const uint8_t*)rgba->pixels + y * rgba->pitch + x * 4;
+                        if (p[0] > 150 && p[1] < 80 && p[2] < 80) redTex++;
+                    }
+                for (int y = OY; y < OY + SIDE && y < rgba->h; y++)
+                    for (int x = OX + 120; x < OX + 120 + SIDE && x < rgba->w; x++) {
+                        const uint8_t* p = (const uint8_t*)rgba->pixels + y * rgba->pitch + x * 4;
+                        if (p[0] > 150 && p[1] < 80 && p[2] < 80) redCtrl++;
+                    }
+                SDL_DestroySurface(rgba);
+                SDL_DestroySurface(s);
+                return true;
+            };
+            int red1 = 0, red2 = 0, rc1 = 0, rc2 = 0;
+            bool rd1 = redIn(red1, rc1);
+            overlayClear(OWNER);                       /* 模拟插件卸载 */
+            bool rd2 = redIn(red2, rc2);
+            PP_WARN("overlay debug: id=%d count=%d | 渲染后 纹理红=%d 对照红=%d | 撤销后 纹理红=%d 对照红=%d",
+                    id, overlayCount(), red1, rc1, red2, rc2);
+            ok = rd1 && rd2 &&
+                 red1 > SIDE * SIDE / 2 &&
+                 rc1 > SIDE * SIDE / 2 &&
+                 red2 == 0 &&
+                 rc2 > SIDE * SIDE / 2 &&           /* 对照在撤销后也应仍在（它不依赖图层） */
+                 overlayCount() == 0;
+            detail = format("渲染后 纹理红=%d 对照红=%d（阈值 %d）；owner 撤销后 纹理红=%d 对照红=%d，"
+                            "图层数 %d -> %d",
+                            red1, rc1, SIDE * SIDE / 2, red2, rc2, 1, overlayCount());
+        }
+        addStep("overlay_owner_revoke", ok, detail);
     }
 
     /* --- 卸载/重载往返测试（验证注册撤销干净） --- */
