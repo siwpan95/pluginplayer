@@ -1045,7 +1045,7 @@ def selfcheck_cases():
         ("bat-ascii-crlf", "把 .bat 的行尾折成裸 LF",
          _subst_bytes("run.bat", b"\r\n", b"\n", count=99)),
         ("plugin-command-count", "把 tests/cli_check.py 的命令数断言改错",
-         _subst("tests/cli_check.py", "== 15", "== 14")),
+         _subst("tests/cli_check.py", "== 20", "== 14")),
         ("native-plugin-set", "把 build.py 的插件表里删掉一个",
          _subst("build.py", '"osd_stats", ', "")),
         ("js-plugin-count", "把 README 的 JS 插件数改错",

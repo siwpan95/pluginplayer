@@ -43,6 +43,37 @@ static int onSubtitleLoadReq(PP_EventCtx* ctx) {
     return 0;
 }
 
+/* P1-d：切轨请求（命令来自 track_selector 插件，内核执行 reopen，单一选择源） */
+static int onTrackSelectReq(PP_EventCtx* ctx) {
+    App* a = (App*)ctx->user;
+    if (!a || !ctx->json) return 0;
+    int type  = (int)jsonGetNumber(ctx->json, "type", -1);
+    int index = (int)jsonGetNumber(ctx->json, "index", -1);
+    if (type < 0 || index < 0) {
+        PP_WARN("track.select: 缺少 type/index 参数");
+        return 0;
+    }
+    if (!a->selectTrack(type, index)) {
+        PP_WARN("track.select: 切换失败（type=%d index=%d 非法或媒体未打开）", type, index);
+    }
+    return 0;
+}
+
+/* P1-d：切音频设备请求（命令来自 audio_device 插件，内核 reopen 音频流，单一选择源） */
+static int onAudioDeviceSetReq(PP_EventCtx* ctx) {
+    App* a = (App*)ctx->user;
+    if (!a || !ctx->json) return 0;
+    double did = jsonGetNumber(ctx->json, "id", -1.0);
+    if (did < 0) {
+        PP_WARN("audio.device.set: 缺少 id 参数");
+        return 0;
+    }
+    if (!a->setAudioDevice((SDL_AudioDeviceID)(int)did)) {
+        PP_WARN("audio.device.set: 切换失败（id=%d）", (int)did);
+    }
+    return 0;
+}
+
 bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     /* 防御性钳位：即使调用方漏了校验，也不让越界尺寸流到 SDL。
      * 越界尺寸会在 SDL_RenderReadPixels / 纹理分配处触发 int32 溢出崩溃。 */
@@ -99,6 +130,10 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     /* P1-c：订阅"加载外部字幕"请求（命令来自 subtitles 插件，内核执行加载，
      * 单一字幕源、渲染交给插件，避免给 ABI 加方法）。owner=0 表示宿主内置。 */
     host_.bus().subscribe("subtitle.load.req", &onSubtitleLoadReq, this, 0);
+    /* P1-d：订阅"切换轨 / 切换音频设备"请求（命令来自 track_selector / audio_device 插件，
+     * 内核执行 reopen，单一选择源、UI 由插件做，避免给 ABI 加方法）。owner=0 表示宿主内置。 */
+    host_.bus().subscribe(PP_TOPIC_TRACK_SELECT_REQ, &onTrackSelectReq, this, 0);
+    host_.bus().subscribe(PP_TOPIC_AUDIO_DEVICE_SET_REQ, &onAudioDeviceSetReq, this, 0);
     /* 所有宿主事件同时转发给控制通道（进程外插件） */
     host_.setEventSink([this](const std::string& t, const std::string& j) {
         rpc_.broadcastEvent(t, j);
@@ -116,6 +151,12 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
                     "可用 PP_FONT=<字体.ttf> 指定（必须是 TrueType 'glyf' 轮廓，OTF/CFF 不支持）",
                     fp.c_str());
         }
+    }
+
+    /* P1-d：init 末尾广播一次可用音频输出设备（供 audio_device 插件在打开媒体前
+     * 就拿到设备列表）。与 openMedia 里的刷新互为补充。 */
+    if (audioEnabled_) {
+        publishEvent(PP_TOPIC_AUDIO_DEVICES, listAudioDevicesJson().c_str());
     }
 
     return true;
@@ -170,7 +211,7 @@ bool App::openAudio() {
     spec.channels = player_.audioChannels();
     spec.freq = player_.audioSampleRate();
 
-    audioStream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+    audioStream_ = SDL_OpenAudioDeviceStream(audioDeviceId_,
                                              &spec, &App::audioCallback, this);
     if (!audioStream_) {
         PP_WARN("打开音频设备失败（将静音播放）: %s", SDL_GetError());
@@ -238,6 +279,71 @@ void App::applyAudioParams() {
     SDL_SetAudioStreamFrequencyRatio(audioStream_, (float)player_.speed());
 }
 
+/* ===========================================================================
+ * P1-d：多轨与音频设备选择（能力通道，内核 reopen 执行，不进 ABI）
+ * =========================================================================== */
+
+bool App::selectTrack(int avMediaType, int streamIndex) {
+    if (!player_.isOpen()) { PP_WARN("selectTrack: 媒体未打开"); return false; }
+    /* 写偏好（内核内部校验 index 属于该类型）；非法直接返回 false，绝不 reopen。 */
+    if (!player_.setPreferredTrack(avMediaType, streamIndex)) {
+        PP_WARN("selectTrack: 非法轨（type=%d index=%d），不切换", avMediaType, streamIndex);
+        return false;
+    }
+    /* 保持当前播放位置，reopen 后 reseek 回去。 */
+    double pos = player_.position();
+    const std::string path = mediaPath_;
+    closeAudio();
+    if (!player_.open(path)) {
+        PP_ERROR("selectTrack: reopen 失败: %s", path.c_str());
+        return false;
+    }
+    openAudio();
+    /* 广播新轨列表与新选中轨（供 track_selector 插件更新 UI）。 */
+    publishEvent(PP_TOPIC_MEDIA_TRACKS, player_.listTracksJson().c_str());
+    publishEvent(PP_TOPIC_MEDIA_TRACK_SEL,
+                 format("{\"type\":%d,\"index\":%d}", avMediaType, streamIndex).c_str());
+    /* 回到切换前的播放位置（reopen 会从头开始）。 */
+    if (pos > 0.0) player_.seekAbsolute(pos);
+    PP_INFO("已切换轨（type=%d index=%d），位置恢复到 %.2fs", avMediaType, streamIndex, pos);
+    return true;
+}
+
+std::string App::listAudioDevicesJson() const {
+    std::string out = "[";
+    bool first = true;
+    auto appendDevice = [&](SDL_AudioDeviceID id, bool isDefault) {
+        const char* name = SDL_GetAudioDeviceName(id);
+        char buf[640];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"id\":%u,\"name\":\"%s\",\"default\":%s}",
+                      (unsigned)id,
+                      jsonEscape(name ? name : "").c_str(),
+                      isDefault ? "true" : "false");
+        if (!first) out += ",";
+        first = false;
+        out += buf;
+    };
+    /* 默认播放设备（sentinel，不在 SDL_GetAudioPlaybackDevices 列表里）。 */
+    appendDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, true);
+    int n = 0;
+    SDL_AudioDeviceID* devs = SDL_GetAudioPlaybackDevices(&n);
+    for (int i = 0; i < n; ++i) appendDevice(devs[i], false);
+    if (devs) SDL_free(devs);
+    out += "]";
+    return out;
+}
+
+bool App::setAudioDevice(SDL_AudioDeviceID id) {
+    audioDeviceId_ = id;
+    /* reopen 音频流即可生效（音频环与解码线程不受影响，播放不中断）。 */
+    closeAudio();
+    openAudio();
+    publishEvent(PP_TOPIC_AUDIO_DEVICE_CHG, format("{\"id\":%u}", (unsigned)id).c_str());
+    PP_INFO("已切换音频输出设备: id=%u", (unsigned)id);
+    return true;
+}
+
 /* ======================= 媒体 ======================= */
 
 bool App::openMedia(const std::string& path) {
@@ -282,6 +388,13 @@ bool App::openMedia(const std::string& path) {
     publishEvent(PP_TOPIC_MEDIA_OPENED, j.c_str());
     PP_INFO("媒体信息: %s %dx%d %.2f fps %s / %s", mi.format, mi.width, mi.height,
             mi.fps, mi.video_codec, mi.audio_codec);
+    /* P1-d：打开新媒体即广播其全部轨（供 track_selector 插件初始化 UI）。 */
+    publishEvent(PP_TOPIC_MEDIA_TRACKS, player_.listTracksJson().c_str());
+    /* P1-d：广播可用音频输出设备（供 audio_device 插件初始化设备列表）。
+     * 设备列表与媒体无关，但随每次 open 刷新一次最稳妥（插拔设备后重开即更新）。 */
+    if (audioEnabled_) {
+        publishEvent(PP_TOPIC_AUDIO_DEVICES, listAudioDevicesJson().c_str());
+    }
     return true;
 }
 
@@ -1133,6 +1246,32 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
     }
     addStep("plugin_commands", cmdsRun > 0 && cmdsFailed == 0,
             cmdsRun ? (cmdDetail + cmdHint) : std::string("没有任何插件注册命令（异常）"));
+
+    /* --- P1-d：多轨切换（reopen 路径） ---
+     * 在当前媒体上重新选择音频轨（同一轨，验证 reopen + reseek 不破坏播放链路）。
+     * 断言：selectTrack 返回成功，且切换点之后 decoded_frames 继续增长（解码没断）。
+     * 注意：reopen 会把 decodedFrames_ 归零并 reseek 到原位置，所以必须以「切换点」
+     * 为基准比对，不能拿切换前的累计值（短片的尾巴帧数远少于之前累计的全片帧数）。 */
+    if (player_.hasAudio()) {
+        bool switched = selectTrack(AVMEDIA_TYPE_AUDIO, player_.audioTrackIndex());
+        /* 切完 reopen 会归零 decodedFrames_ 并 reseek 到原位置；以切换点为基准。 */
+        int64_t decAtSwitch = player_.decodedFrames();
+        double dl = (double)SDL_GetTicks() / 1000.0 + 8.0;
+        while ((double)SDL_GetTicks() / 1000.0 < dl) {
+            rpc_.pumpMainThread();
+            stepAudioPreroll();
+            player_.pumpFrame();
+            SDL_Delay(2);
+        }
+        int64_t decAfter = player_.decodedFrames();
+        addStep("track_switch", switched && decAfter > decAtSwitch,
+                format("selectTrack(audio,%d)=%d，切换点解码 %lld / 切换后 %lld（增长 %lld）",
+                       player_.audioTrackIndex(), switched,
+                       (long long)decAtSwitch, (long long)decAfter,
+                       (long long)(decAfter - decAtSwitch)));
+    } else {
+        skipStep("track_switch", "媒体没有音频轨，不适用多轨切换校验");
+    }
 
     /* --- 渲染一次并抓屏，然后**验证抓屏里真的有画面** ---
      * 这一项以前只断言 `surf != nullptr`，等于"SDL 没报错就算过"。实测抓到的

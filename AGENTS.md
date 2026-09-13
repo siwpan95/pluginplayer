@@ -14,7 +14,7 @@ PluginPlayer 是一个把**一切功能做成插件**的 Windows 播放器：FFm
 src/sdk/player_plugin.h   插件 ABI（纯 C，进程内插件的唯一契约）
 src/core/                 播放内核 + 插件宿主（player / app / host / eventbus /
                           registry / pluginhost / osd / control / config / util / main）
-src/plugins/<name>/       6 个原生插件，各自独立 .cpp → .dll
+src/plugins/<name>/       8 个原生插件，各自独立 .cpp → .dll
 host-js/                  进程外 JS 插件宿主：src/（Cordis 宿主）+ plugins/*.mjs
 examples/hello_plugin/    最小原生插件示例（PLUGIN_GUIDE 逐行讲解）
 tests/                    冒烟（smoke_link / smoke_audio）、插件 API 回归、CLI 回归（cli_check.py）、

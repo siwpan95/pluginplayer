@@ -76,12 +76,14 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 
 | 文件 |
 |---|
+| `plugins/audio_device.dll` |
 | `plugins/audio_viz.dll` |
 | `plugins/hotkey_ext.dll` |
 | `plugins/manifest.sha256` |
 | `plugins/osd_stats.dll` |
 | `plugins/snapshot.dll` |
 | `plugins/subtitles.dll` |
+| `plugins/track_selector.dll` |
 | `plugins/video_effects.dll` |
 
 ### 其它随包文件（本项目产物或配置）
@@ -95,7 +97,7 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 
 ### `dist/` 载荷
 
-发布载荷共 **20 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
+发布载荷共 **22 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
 
 ## 开发期使用、但不随发布物分发
 

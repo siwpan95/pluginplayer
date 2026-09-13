@@ -39,7 +39,7 @@ F:\Python314\python.exe build.py --release
 | FFmpeg 运行时 | `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` | 93 + 19 + 3 + 2.3 + 0.5 MB，**大头在 avcodec** |
 | 图形/音频 | `SDL3.dll` | 5.2 MB |
 | MinGW 运行时 | `libwinpthread-1` / `libgcc_s_seh-1` / `libstdc++-6` | 内核与 `video_effects` 需要 |
-| 插件 | `plugins/*.dll`（6 个）+ `plugins/manifest.sha256` | 清单存在即强制校验 |
+| 插件 | `plugins/*.dll`（8 个）+ `plugins/manifest.sha256` | 清单存在即强制校验 |
 | 配置 | `config/pluginplayer.ini` | 只在不存在时生成，**不覆盖用户已有设置** |
 
 `avfilter` / `avdevice` **不随包**（省约 110 MB）；需要它们的是 `ffmpeg.exe` 命令行工具，

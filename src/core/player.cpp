@@ -196,8 +196,8 @@ bool Player::open(const std::string& path) {
         return false;
     }
 
-    vStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    aStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    vStream_ = chooseStream(AVMEDIA_TYPE_VIDEO, prefVideo_);
+    aStream_ = chooseStream(AVMEDIA_TYPE_AUDIO, prefAudio_);
     if (vStream_ < 0 && aStream_ < 0) {
         PP_ERROR("未找到可解码的音视频流: %s", path.c_str());
         close();
@@ -208,11 +208,15 @@ bool Player::open(const std::string& path) {
     if (aStream_ >= 0 && !openAudioCodec(aStream_)) { close(); return false; }
 
     /* 字幕流：能开就开，开不了也不致命（只是没字幕）。 */
-    sStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_SUBTITLE, -1, -1, nullptr, 0);
+    sStream_ = chooseStream(AVMEDIA_TYPE_SUBTITLE, prefSub_);
     if (sStream_ >= 0 && !openSubtitleCodec(sStream_)) {
         PP_WARN("字幕解码器打开失败，继续播放（无字幕）");
         sStream_ = -1;
     }
+
+    /* P1-d：构建全部轨列表（供 media.tracks 事件与 player.tracks RPC）。
+     * 必须在选流之后调用，selected 标记才正确。 */
+    buildTrackList();
 
     duration_ = (fmt_->duration != AV_NOPTS_VALUE)
                     ? (double)fmt_->duration / AV_TIME_BASE
@@ -610,6 +614,136 @@ std::vector<SubCue> Player::parseSrt(const std::string& path) {
         i = j;
     }
     return cues;
+}
+
+/* ===========================================================================
+ * P1-d：多轨能力通道
+ * 选择（setPreferredTrack）→ 由调用方 reopen 媒体；内核不进 ABI。
+ * =========================================================================== */
+
+int Player::chooseStream(enum AVMediaType t, int pref) {
+    /* pref 合法：在流数量范围内、且类型确实匹配 → 直接用偏好轨。 */
+    if (pref >= 0 && fmt_ && pref < (int)fmt_->nb_streams) {
+        AVStream* st = fmt_->streams[pref];
+        if (st && st->codecpar && st->codecpar->codec_type == t) {
+            return pref;
+        }
+        PP_WARN("P1-d chooseStream: 偏好轨 %d 类型不匹配或越界，退回自动选择",
+                pref);
+    }
+    /* 否则退回 FFmpeg 自动最优流。 */
+    return av_find_best_stream(fmt_, t, -1, -1, nullptr, 0);
+}
+
+void Player::buildTrackList() {
+    tracks_.clear();
+    if (!fmt_) return;
+    for (unsigned i = 0; i < fmt_->nb_streams; ++i) {
+        AVStream* st = fmt_->streams[i];
+        if (!st || !st->codecpar) continue;
+        const enum AVMediaType mt = st->codecpar->codec_type;
+        /* 只收录 视频/音频/字幕 三类；数据/附件等轨对外无意义。 */
+        if (mt != AVMEDIA_TYPE_VIDEO && mt != AVMEDIA_TYPE_AUDIO &&
+            mt != AVMEDIA_TYPE_SUBTITLE) {
+            continue;
+        }
+        TrackInfo ti;
+        ti.index = (int)i;
+        ti.type  = (int)mt;
+        const AVCodec* c = avcodec_find_decoder(st->codecpar->codec_id);
+        ti.codec = c ? c->name : avcodec_get_name(st->codecpar->codec_id);
+        /* 语言 / 标题：从流的 metadata 字典取，取不到留空串。 */
+        if (st->metadata) {
+            AVDictionaryEntry* lang = av_dict_get(st->metadata, "language", nullptr, 0);
+            if (lang && lang->value) ti.lang = lang->value;
+            AVDictionaryEntry* title = av_dict_get(st->metadata, "title", nullptr, 0);
+            if (title && title->value) ti.title = title->value;
+        }
+        /* selected：当前 open() 实际选中的那条流。 */
+        ti.selected = (i == (unsigned)vStream_ && mt == AVMEDIA_TYPE_VIDEO) ||
+                      (i == (unsigned)aStream_ && mt == AVMEDIA_TYPE_AUDIO) ||
+                      (i == (unsigned)sStream_ && mt == AVMEDIA_TYPE_SUBTITLE);
+        tracks_.push_back(std::move(ti));
+    }
+}
+
+std::string Player::listTracksJson() const {
+    /* 手工拼 JSON（不引入第三方库），media.tracks 事件载荷。
+     * 形如：{"video":[...],"audio":[...],"subtitle":[...]}。 */
+    std::string out = "{\"video\":[";
+    bool first = true;
+    for (const auto& t : tracks_) {
+        if (t.type != AVMEDIA_TYPE_VIDEO) continue;
+        if (!first) out += ",";
+        first = false;
+        char buf[384];
+        std::snprintf(buf, sizeof(buf),
+            "{\"index\":%d,\"codec\":\"%s\",\"lang\":\"%s\",\"title\":\"%s\",\"selected\":%s}",
+            t.index,
+            jsonEscape(t.codec).c_str(),
+            jsonEscape(t.lang).c_str(),
+            jsonEscape(t.title).c_str(),
+            t.selected ? "true" : "false");
+        out += buf;
+    }
+    out += "],\"audio\":[";
+    first = true;
+    for (const auto& t : tracks_) {
+        if (t.type != AVMEDIA_TYPE_AUDIO) continue;
+        if (!first) out += ",";
+        first = false;
+        char buf[384];
+        std::snprintf(buf, sizeof(buf),
+            "{\"index\":%d,\"codec\":\"%s\",\"lang\":\"%s\",\"title\":\"%s\",\"selected\":%s}",
+            t.index,
+            jsonEscape(t.codec).c_str(),
+            jsonEscape(t.lang).c_str(),
+            jsonEscape(t.title).c_str(),
+            t.selected ? "true" : "false");
+        out += buf;
+    }
+    out += "],\"subtitle\":[";
+    first = true;
+    for (const auto& t : tracks_) {
+        if (t.type != AVMEDIA_TYPE_SUBTITLE) continue;
+        if (!first) out += ",";
+        first = false;
+        char buf[384];
+        std::snprintf(buf, sizeof(buf),
+            "{\"index\":%d,\"codec\":\"%s\",\"lang\":\"%s\",\"title\":\"%s\",\"selected\":%s}",
+            t.index,
+            jsonEscape(t.codec).c_str(),
+            jsonEscape(t.lang).c_str(),
+            jsonEscape(t.title).c_str(),
+            t.selected ? "true" : "false");
+        out += buf;
+    }
+    out += "]}";
+    return out;
+}
+
+bool Player::setPreferredTrack(int avMediaType, int streamIndex) {
+    /* 验证：streamIndex 属于该媒体类型且在范围内才写入。 */
+    if (!fmt_ || streamIndex < 0 || streamIndex >= (int)fmt_->nb_streams)
+        return false;
+    AVStream* st = fmt_->streams[streamIndex];
+    if (!st || !st->codecpar ||
+        st->codecpar->codec_type != (enum AVMediaType)avMediaType) {
+        return false;
+    }
+    switch (avMediaType) {
+        case AVMEDIA_TYPE_VIDEO:    prefVideo_ = streamIndex; break;
+        case AVMEDIA_TYPE_AUDIO:    prefAudio_ = streamIndex; break;
+        case AVMEDIA_TYPE_SUBTITLE: prefSub_   = streamIndex; break;
+        default:                    return false;
+    }
+    return true;
+}
+
+void Player::resetTrackPrefs() {
+    prefVideo_ = -1;
+    prefAudio_ = -1;
+    prefSub_   = -1;
 }
 
 void Player::close() {

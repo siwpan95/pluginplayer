@@ -31,7 +31,7 @@ pluginplayer doctor          :: 体检：Python/编译器/Node/vendor/dist/插�
 
 ```bat
 F:\Python314\python.exe tools\fetch_deps.py     :: 1) 准备 vendor/（首次必须）
-F:\Python314\python.exe build.py                :: 2) 编译内核 + 6 个插件 + 打包 dist/
+F:\Python314\python.exe build.py                :: 2) 编译内核 + 8 个插件 + 打包 dist/
 F:\Python314\python.exe build.py --smoke        :: 3) 工具链冒烟（SDL3/FFmpeg 能否链接并解码）
 pluginplayer selftest                           :: 4) 全链路自检（样例自动生成，产出 JSON 报告）
 ```

@@ -777,7 +777,7 @@ P1-b + P1-c 合并为一批（叠加层是字幕的底座，一起做避免接�
 |---|---|
 | 新增/改 `PP_HostApi` / `PP_OsdApi` / `PP_MediaInfo` 字段 | `PP_ABI_VERSION` **2 → 3**（`player_plugin.h:78`）；重编全部 5 个原生插件；同步 `docs/PLUGIN_GUIDE.md`、`examples/hello_plugin`、`docs/ARCHITECTURE.md` §8；新增 `versions-align` 对 ABI 版本的断言 |
 | 新增插件 / 新增命令 | `plugin-command-count`（现 15）、`native-plugin-set`（现 5）、`js-plugin-count`（现 3）三处门禁的期望值；`README.md`「内置插件」表；`docs/CLI.md` |
-| 新增 RPC 方法 | `rpc-methods-align`（现 19 个）+ `docs/ARCHITECTURE.md` §7.2 方法一览 |
+| 新增 RPC 方法 | `rpc-methods-align`（现 23 个）+ `docs/ARCHITECTURE.md` §7.2 方法一览 |
 | 新增 CLI 命令 | `cli-commands-align`（现 25 个）+ `README.md` + `docs/CLI.md` |
 | 新增数值边界 | `arg-bounds-align`（现 13 项）+ `tools/pp_cli.py` |
 | 新增/升级依赖（SDL3、libass、stb、字体） | `THIRD_PARTY_NOTICES.md`（**生成物，必须重跑 `tools/gen_third_party_notices.py`**）；`versions-align`；`DEPS_SHA256`；`fetch_deps.py` |

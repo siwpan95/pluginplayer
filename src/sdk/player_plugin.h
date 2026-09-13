@@ -172,6 +172,14 @@ enum PP_DispatchMode {
 #define PP_TOPIC_UI_RESIZE      "ui.resize"     /* EMIT */
 #define PP_TOPIC_OSD_DRAW       "osd.draw"      /* EMIT：插件在此绘制叠加层 */
 
+/* P1-d：多轨与音频设备选择 */
+#define PP_TOPIC_MEDIA_TRACKS    "media.tracks"   /* EMIT：全部 视频/音频/字幕 轨列表（JSON 数组） */
+#define PP_TOPIC_MEDIA_TRACK_SEL "media.track_selected" /* EMIT：用户切换了某轨 {type,index} */
+#define PP_TOPIC_AUDIO_DEVICES   "audio.devices"  /* EMIT：可用音频输出设备（JSON 数组） */
+#define PP_TOPIC_AUDIO_DEVICE_CHG "audio.device_changed" /* EMIT：音频输出设备已切换 {id} */
+#define PP_TOPIC_TRACK_SELECT_REQ "track.select.req"   /* BAIL：插件请求切轨，内核 reopen 执行 */
+#define PP_TOPIC_AUDIO_DEVICE_SET_REQ "audio.device.set.req" /* BAIL：插件请求切设备，内核 reopen 执行 */
+
 /* ===========================================================================
  * 数据结构
  * =========================================================================== */

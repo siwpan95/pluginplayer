@@ -317,7 +317,8 @@ int revoked = host->revokeAll(slot);   // 撤销该插件的全部注册
 ```
 
 方法一览：`auth`、`ping`、`player.info|stats|play|pause|toggle|stop|seek|volume|mute|speed|open`、
-`command.invoke|list`、`service.list`、`plugin.list`、`topic.subscribe`（`"*"` 订阅全部）、`app.quit`。
+`command.invoke|list`、`service.list`、`plugin.list`、`topic.subscribe`（`"*"` 订阅全部）、`app.quit`、
+`player.tracks|select_track`、`audio.devices|set_device`（P1-d：多轨 + 音频设备选择）。
 
 宿主事件统一经 `Host::publishTopic()` 发出：既分发给进程内订阅者，也同步转发给
 **已认证的**控制通道客户端。

@@ -55,6 +55,16 @@ public:
     void setAllowNetworkInput(bool b) { allowNetworkInput_ = b; }
     bool allowNetworkInput() const { return allowNetworkInput_; }
 
+    /* P1-d：多轨与音频设备选择（能力通道；选择由内核 reopen 执行，不进 ABI） */
+    /** 切换某类型轨：写入偏好并 reopen 媒体（保持当前播放位置），成功返回 true。
+     *  avMediaType 传 AVMediaType 值；streamIndex 为该类型流在 fmt 中的序号。 */
+    bool selectTrack(int avMediaType, int streamIndex);
+    /** 列出可用音频输出设备（JSON 数组，对应 audio.devices 事件）。 */
+    std::string listAudioDevicesJson() const;
+    /** 切换音频输出设备：写 audioDeviceId_ 并 reopen 音频流，成功返回 true。 */
+    bool setAudioDevice(SDL_AudioDeviceID id);
+    SDL_AudioDeviceID audioDeviceId() const { return audioDeviceId_; }
+
 private:
     /* 主循环分步 */
     void pollEvents();
@@ -154,6 +164,9 @@ private:
 
     /* 音频输出 */
     SDL_AudioStream*   audioStream_ = nullptr;
+    /* P1-d：目标音频输出设备。默认 SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK；
+     * setAudioDevice 改写后由 openAudio() 用于打开指定设备。 */
+    SDL_AudioDeviceID  audioDeviceId_ = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
     std::vector<uint8_t> pullBuf_;
 
     Host       host_;

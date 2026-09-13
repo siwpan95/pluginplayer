@@ -159,6 +159,11 @@ public:
     bool   finished() const;
     bool   hasAudio() const { return aStream_ >= 0; }
     bool   hasVideo() const { return vStream_ >= 0; }
+    /** 当前选中的流序号（供自检/P1-d 切轨验证；不涉及 ABI）。 */
+    int    audioTrackIndex() const { return aStream_; }
+    int    videoTrackIndex() const { return vStream_; }
+    int    subtitleTrackIndex() const { return sStream_; }
+    int64_t decodedFrames() const { return decodedFrames_; }
     /** 实际生效的硬件解码名（"d3d11va"），纯软解时返回空串。 */
     const char* hwdecName() const { return hwActive_ ? hwName_ : ""; }
 
@@ -218,6 +223,22 @@ public:
     void  loadExternalSubtitles(const std::vector<SubCue>& cues);
     static std::vector<SubCue> parseSrt(const std::string& path);
 
+    /* --- 多轨（P1-d，能力通道；选择由内核 reopen 执行，渲染/UI 由插件做） --- */
+    struct TrackInfo {
+        int         index = -1;
+        int         type = 0;        /* AVMediaType */
+        std::string codec;
+        std::string lang;
+        std::string title;
+        bool        selected = false;
+    };
+    /** 当前媒体的全部 视频/音频/字幕 轨（JSON 数组，对应 media.tracks 事件）。主线程调用。 */
+    std::string listTracksJson() const;
+    /** 设定偏好轨：验证 idx 属于该媒体类型后写入，返回 false 表示非法（不切换）。 */
+    bool setPreferredTrack(int avMediaType, int streamIndex);
+    /** 清除偏好轨（下次 open 退回自动选最佳）。 */
+    void resetTrackPrefs();
+
 private:
     void demuxLoop();
     void videoDecodeLoop();
@@ -226,6 +247,10 @@ private:
     bool openAudioCodec(int idx);
     bool openSubtitleCodec(int idx);
     void subtitleDecodeLoop();
+    /** 按偏好选流：pref 合法（类型匹配且越界内）就用 pref，否则退回 av_find_best_stream。 */
+    int  chooseStream(enum AVMediaType t, int pref);
+    /** 构建 tracks_（当前媒体全部 视频/音频/字幕 轨）。 */
+    void buildTrackList();
     void flushAfterSeek(double target);
     static int interruptCb(void* opaque);
 
@@ -256,6 +281,10 @@ private:
     AVCodecContext*  sCtx_ = nullptr;
     PacketQueue      sq_;
     std::thread      sdecTh_;
+    /* P1-d 轨道偏好：selectTrack 写入，open() 据此选流；resetTrackPrefs 清空（退回自动）。
+     * 注意 open() 不重置它们——否则 selectTrack 触发的 reopen 会把刚写好的偏好冲掉。 */
+    std::vector<TrackInfo> tracks_;   /* 当前媒体全部轨（open 时构建，供 media.tracks 事件） */
+    int              prefVideo_ = -1, prefAudio_ = -1, prefSub_ = -1;
     std::vector<SubCue> subCues_;        /* 当前活跃字幕（内嵌累计 + 外部覆盖） */
     mutable std::mutex  subMu_;
     bool             subExternal_ = false;

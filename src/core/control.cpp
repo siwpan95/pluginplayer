@@ -524,6 +524,39 @@ std::string RpcServer::handleRequest(const std::string& line, const std::shared_
         return r ? ok("{\"opened\":true}") : err("打开失败: " + app->lastError());
     }
 
+    /* P1-d：多轨 */
+    if (method == "player.tracks") {
+        if (!pl) return err("player 未就绪");
+        /* listTracksJson() 已是 {video:[...],audio:[...],subtitle:[...]} 对象串。 */
+        return ok(pl->listTracksJson());
+    }
+
+    if (method == "player.select_track") {
+        if (!app) return err("app 未就绪");
+        int type  = (int)jsonGetNumber(params, "type", -1);
+        int index = (int)jsonGetNumber(params, "index", -1);
+        if (type < 0 || index < 0) return err("缺少 type/index 参数");
+        bool r = app->selectTrack(type, index);
+        return r ? ok(format("{\"selected\":{\"type\":%d,\"index\":%d}}", type, index))
+                 : err("切换失败（非法轨或媒体未打开）");
+    }
+
+    /* P1-d：音频设备 */
+    if (method == "audio.devices") {
+        if (!app) return err("app 未就绪");
+        /* listAudioDevicesJson() 已是 JSON 数组串。 */
+        return ok(app->listAudioDevicesJson());
+    }
+
+    if (method == "audio.set_device") {
+        if (!app) return err("app 未就绪");
+        double did = jsonGetNumber(params, "id", -1.0);
+        if (did < 0) return err("缺少 id 参数");
+        bool r = app->setAudioDevice((SDL_AudioDeviceID)(int)did);
+        return r ? ok(format("{\"device\":{\"id\":%u}}", (unsigned)(int)did))
+                 : err("切换音频设备失败");
+    }
+
     if (method == "command.invoke") {
         std::string name = jsonGetString(params, "name", "");
         if (name.empty() || !host_) return err("缺少 name 参数");
