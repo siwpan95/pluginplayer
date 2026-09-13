@@ -453,15 +453,37 @@ def t_quit_open_connection_fast():
         assert s, "控制通道迟迟没有监听 127.0.0.1:%d" % port
         s.sendall(('{"id":1,"method":"auth","params":{"token":"%s"}}\n' % token)
                   .encode("utf-8"))
+        # 注意：未订阅任何主题的连接会收到**全部**广播事件（topics.empty() == 全部），
+        # 所以认证应答之前可能先到 app.tick。必须跳过事件行，不能把第一行当应答。
         s.settimeout(5.0)
         buf = b""
-        while b"\n" not in buf:
-            chunk = s.recv(4096)
-            if not chunk:
+        auth = None
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            while b"\n" not in buf:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    chunk = b""
+                if not chunk:
+                    break
+                buf += chunk
+            if b"\n" not in buf:
                 break
-            buf += chunk
-        auth = json.loads(buf.decode("utf-8", "replace").splitlines()[0])
-        assert auth.get("ok"), "认证失败: %s" % auth
+            i = buf.index(b"\n")
+            line = buf[:i].decode("utf-8", "replace").strip()
+            buf = buf[i + 1:]
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and "event" in obj:
+                continue
+            auth = obj
+            break
+        assert auth and auth.get("ok"), "认证失败: %s" % (auth,)
 
         t0 = time.time()
         s.sendall(b'{"id":2,"method":"app.quit","params":{}}\n')

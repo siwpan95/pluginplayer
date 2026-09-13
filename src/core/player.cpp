@@ -190,6 +190,17 @@ bool Player::open(const std::string& path) {
     fmt_->interrupt_callback.callback = &Player::interruptCb;
     fmt_->interrupt_callback.opaque = this;
 
+    /* 慢启动网络流的探测窗口。
+     * 不设 analyzeduration 时它是 0 —— avformat 会在拿到**完整帧**之前就放弃：
+     * 实测打开"刚开播的电台 /stream"（源还在拉、数据一滴滴来）时报
+     *   "Could not find codec parameters for stream 0 (Audio: mp3, 0 channels, fltp):
+     *    unspecified frame size"
+     * 给 3 秒上限让它等到真正的音频帧。注意这是**上限不是固定等待**：本地文件与
+     * 热流参数一齐就立刻返回，不会把"打开"拖慢 3 秒。 */
+    /* 注意 FFmpeg 9 已把该字段改名为 max_analyze_duration（旧名 analyzeduration 已移除） */
+    fmt_->max_analyze_duration = 3 * AV_TIME_BASE;
+    fmt_->probesize = 8 * 1024 * 1024;    /* 默认 5 MB，稍放大以覆盖慢速流的首帧 */
+
     if (avformat_find_stream_info(fmt_, nullptr) < 0) {
         PP_ERROR("avformat_find_stream_info 失败");
         close();
