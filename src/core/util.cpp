@@ -795,6 +795,17 @@ YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int
 
 int sdlColorspaceFor(const YuvColorChoice& c, int* fellBack) {
     if (fellBack) *fellBack = 0;
+    /* HDR：BT.2020 原色 + PQ 传输 → HDR10（PQ 是 SDL 唯一有枚举的 HDR 传输函数）。
+     * 这一支优先于矩阵映射：HDR 的矩阵一定是 BT.2020，但逆之不成立。 */
+    if (c.primaries == 9 /* AVCOL_PRI_BT2020 */ && c.trc == 16 /* AVCOL_TRC_SMPTE2084 */)
+        return PP_SDL_CS_HDR10;
+    /* HLG：BT.2020 原色 + HLG 传输。SDL 3.4.16 没有 HLG 枚举，只能用 BT.2020
+     * （矩阵正确；传输函数按 G22，HLG 会轻微偏色 —— 已知限制，待 SDL 补枚举）。 */
+    if (c.primaries == 9 /* AVCOL_PRI_BT2020 */ && c.trc == 18 /* AVCOL_TRC_ARIB_STD_B67 */) {
+        const int full = c.fullRange ? 1 : 0;
+        return full ? PP_SDL_CS_BT2020_FULL : PP_SDL_CS_BT2020_LIMITED;
+    }
+    /* SDR：矩阵 + 范围映射（P2-L1 前的行为，完全不变）。 */
     const int full = c.fullRange ? 1 : 0;
     switch (c.matrix) {
         case YUV_MATRIX_BT709:

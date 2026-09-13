@@ -74,6 +74,20 @@ static int onAudioDeviceSetReq(PP_EventCtx* ctx) {
     return 0;
 }
 
+/* P2-L1：video.color 服务 —— 内核把当前视频帧色彩元数据暴露给插件（ABI 安全的
+ * get_service 机制，不进 PP_ABI_VERSION）。SDL 不在播放器初始化时知道内容是否 HDR，
+ * 所以这些值是"最近一次上传的帧"的快照，插件按需查询。 */
+static pp::App* s_colorApp = nullptr;
+static uint32_t svcVideoCurCs() { return s_colorApp ? s_colorApp->curVideoColorspace() : 0u; }
+static int      svcVideoPri()   { return s_colorApp ? s_colorApp->curVideoPrimaries() : 2; }
+static int      svcVideoTrc()   { return s_colorApp ? s_colorApp->curVideoTransfer()   : 2; }
+static int      svcVideoMat()   { return s_colorApp ? s_colorApp->curVideoMatrix()     : 0; }
+static int      svcVideoRange() { return s_colorApp ? s_colorApp->curVideoFullRange()  : 0; }
+static int      svcVideoHdr()   { return s_colorApp ? (s_colorApp->curVideoIsHdr() ? 1 : 0) : 0; }
+static PP_VideoColorService g_videoColorService = {
+    &svcVideoCurCs, &svcVideoPri, &svcVideoTrc, &svcVideoMat, &svcVideoRange, &svcVideoHdr
+};
+
 bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     /* 防御性钳位：即使调用方漏了校验，也不让越界尺寸流到 SDL。
      * 越界尺寸会在 SDL_RenderReadPixels / 纹理分配处触发 int32 溢出崩溃。 */
@@ -127,6 +141,10 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     if (!host_.init(appDir)) return false;
     host_.setApp(this);
     host_.setPlayer(&player_);
+    /* P2-L1：注册 video.color 服务（内核暴露当前视频色彩元数据；ABI 安全，不升版本号）。
+     * 放在 host_.init 之后：api_ 此时已 buildApi 完成；插件经 get_service 在运行时取用。 */
+    s_colorApp = this;
+    host_.api()->register_service(host_.handle(), "video.color", "1.0.0", &g_videoColorService);
     /* P1-e：把字幕 ASS 事件（header / 每帧 dialogue）经事件总线转发出去，
      * 供 subtitles 插件用 libass 渲染（不进 ABI，单一字幕源在内核）。 */
     player_.setSubtitlePublisher([this](const char* t, const char* j) {
@@ -780,6 +798,16 @@ bool App::pumpAndUpload(bool force) {
             PP_WARN("该色彩矩阵在 SDL 里没有对应枚举（FCC/SMPTE240M），"
                     "NV12 纹理按 BT.601 处理");
         }
+        /* P2-L1：把这一帧的色彩元数据记下来，供 video.color 服务暴露给插件；
+         * 同时 HDR 内容首次出现时最好努力把渲染器输出切到 HDR（仅当显示器真的
+         * 支持 HDR —— 否则不重建、维持 SDR，SDL 自动做 HDR→SDR 色调映射）。 */
+        curVideoCs_ = (uint32_t)cs;
+        curPrimaries_ = cc.primaries;
+        curTrc_ = cc.trc;
+        curMatrix_ = cc.matrix;
+        curFullRange_ = cc.fullRange;
+        curIsHdr_ = isHdrColorChoice(cc);
+        if (curIsHdr_) ensureHdrOutput_();
     }
 
     if (!tex_ || texW_ != frame->w || texH_ != frame->h || texFmt_ != fmt ||
@@ -817,6 +845,50 @@ bool App::pumpAndUpload(bool force) {
 }
 
 /* ======================= 渲染 ======================= */
+
+void App::ensureHdrOutput_() {
+    if (hdrOutputConfigured_) return;
+    hdrOutputConfigured_ = true;   /* 只尝试一次，无论成败都不再重入 */
+
+    /* 显示器不支持 HDR：维持默认 SDR 输出（纹理已标 HDR10，SDL 自动做 HDR→SDR
+     * 色调映射回退）。这是绝大多数环境（dummy 驱动 / 普通 SDR 屏）的落点。 */
+    SDL_DisplayID disp = SDL_GetDisplayForWindow(win_);
+    SDL_PropertiesID dp = SDL_GetDisplayProperties(disp);
+    bool hdrDisp = SDL_GetBooleanProperty(dp, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+    SDL_DestroyProperties(dp);
+    if (!hdrDisp) {
+        PP_INFO("显示器不支持 HDR：维持 SDR 输出（HDR 纹理由 SDL 做 HDR→SDR 色调映射）");
+        return;
+    }
+    /* 已是 HDR 输出则跳过。 */
+    SDL_PropertiesID rprops = SDL_GetRendererProperties(ren_);
+    Uint32 cur = (Uint32)SDL_GetNumberProperty(rprops, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER, 0);
+    SDL_DestroyProperties(rprops);
+    if (cur == PP_SDL_CS_SRGB_LINEAR) return;
+
+    PP_INFO("显示器支持 HDR：重建渲染器以启用 HDR 输出 (SRGB_LINEAR)");
+    /* 先把现有纹理与叠加层作废，让它们随下一帧 / 下一调用重建（renderOverlays
+     * 对空 tex 有保护，不会在重建间隙崩）。 */
+    if (tex_) { SDL_DestroyTexture(tex_); tex_ = nullptr; }
+    texW_ = texH_ = texFmt_ = 0; texCs_ = -1;
+    for (auto& o : overlays_) if (o.tex) { SDL_DestroyTexture(o.tex); o.tex = nullptr; }
+    SDL_DestroyRenderer(ren_); ren_ = nullptr;
+
+    SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetPointerProperty(props, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, win_);
+    SDL_SetNumberProperty(props, SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER, (Sint64)PP_SDL_CS_SRGB_LINEAR);
+    SDL_SetNumberProperty(props, SDL_PROP_RENDERER_CREATE_PRESENT_VSYNC_NUMBER, 1);
+    SDL_Renderer* r = SDL_CreateRendererWithProperties(props);
+    SDL_DestroyProperties(props);
+    if (!r) {
+        PP_WARN("HDR 渲染器创建失败（%s），回退默认 SDR 渲染器", SDL_GetError());
+        r = SDL_CreateRenderer(win_, nullptr);
+        if (!r) { lastError_ = format("SDL_CreateRenderer 失败: %s", SDL_GetError()); return; }
+    }
+    ren_ = r;
+    SDL_SetRenderVSync(ren_, 1);
+    SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_BLEND);
+}
 
 void App::renderFrame() {
     /* 渲染几何一律按「渲染像素」计算：SDL_GetWindowSize 给的是窗口逻辑尺寸，在高

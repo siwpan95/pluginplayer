@@ -42,7 +42,7 @@ CORE_SOURCES = [
 
 # 插件目录名 -> 输出 DLL 名
 PLUGINS = ["osd_stats", "video_effects", "audio_viz", "snapshot", "hotkey_ext",
-           "subtitles", "track_selector", "audio_device"]
+           "subtitles", "track_selector", "audio_device", "video_quality"]
 
 # tests/ 下的冒烟测试：编译后立即运行，退出码 0 视为通过。
 # 早期版本这两个文件不被任何脚本引用 —— 等于没有测试入口。

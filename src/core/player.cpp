@@ -1182,6 +1182,16 @@ void Player::videoDecodeLoop() {
                     if (rgId == 0) rgId = (int)par->color_range;
                 }
                 if (csId == 2) csSrc = "按分辨率推测";
+                /* P2-L1：原色（primaries）与传输函数（trc）也要读 —— 这是 HDR 的唯一判据
+                 * （BT.2020 原色 + PQ/HLG 传输 = HDR10）。取值优先级同 colorspace：
+                 * 先逐帧 fr->*，未标注(2=UNSPECIFIED)回退流级 codecpar->*。 */
+                int prId = (int)fr->color_primaries;
+                int trcId = (int)fr->color_trc;
+                {
+                    const AVCodecParameters* par = fmt_->streams[vStream_]->codecpar;
+                    if (prId == 2) prId = (int)par->color_primaries;
+                    if (trcId == 2) trcId = (int)par->color_trc;
+                }
                 YuvColorChoice cc = chooseYuvColor(csId, rgId, w, h);
 
                 /* 这两项也进重建条件 —— 素材中途换色彩标注（合流/拼接）时要重建上下文。

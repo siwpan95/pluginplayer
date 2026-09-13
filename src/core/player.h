@@ -57,6 +57,10 @@ struct VideoFrame {
      * 把矩阵/范围告诉 SDL —— GPU 才知道该用哪套系数做 YUV→RGB。 */
     int      colorMatrix = 0;
     int      fullRange = 0;
+    /* P2-L1：原色 / 传输函数（AVCOL_PRI_* / AVCOL_TRC_*，默认 UNSPECIFIED=2）。
+     * 这两项 + 上面两项共同决定纹理该标哪个 SDL_Colorspace（HDR 判定全靠它俩）。 */
+    int      colorPrimaries = 2;
+    int      colorTrc = 2;
     double   pts = 0.0;
     double   duration = 0.0;
     int64_t  index = 0;

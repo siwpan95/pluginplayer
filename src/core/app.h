@@ -65,6 +65,14 @@ public:
     bool setAudioDevice(SDL_AudioDeviceID id);
     SDL_AudioDeviceID audioDeviceId() const { return audioDeviceId_; }
 
+    /* P2-L1：video.color 服务用的色彩元数据 getter（只读快照，最近一次上传帧） */
+    uint32_t curVideoColorspace() const { return curVideoCs_; }
+    int      curVideoPrimaries()  const { return curPrimaries_; }
+    int      curVideoTransfer()   const { return curTrc_; }
+    int      curVideoMatrix()     const { return curMatrix_; }
+    int      curVideoFullRange()  const { return curFullRange_; }
+    bool     curVideoIsHdr()      const { return curIsHdr_; }
+
 private:
     /* 主循环分步 */
     void pollEvents();
@@ -80,6 +88,9 @@ private:
      *  返回 false 表示物化失败（这一帧不能给插件，调用方应照常显示并跳过帧链）。
      *  必须与帧链在同一线程（主线程）调用。 */
     bool makeFrameView(const std::shared_ptr<VideoFrame>& f, PP_FrameView* view);
+    /** P2-L1：显示器支持 HDR 时把渲染器重建为 HDR 输出（SRGB_LINEAR 色彩空间），
+     *  否则维持 SDR（SDL 自动做 HDR→SDR 色调映射）。只重建一次（hdrOutputConfigured_ 守卫）。 */
+    void ensureHdrOutput_();
     void renderFrame();
     void renderBuiltinOverlay();       /* 帮助/提示层（核心自带） */
     void stepAudioLead();
@@ -148,6 +159,14 @@ private:
     bool               osdHidden_ = false;   /* O 键：整体隐藏 OSD（插件叠加层 + 内置角标） */
     bool               completedFired_ = false;
     bool               allowNetworkInput_ = false;
+    /* P2-L1：最近一次上传视频帧的色彩元数据快照（video.color 服务用） */
+    uint32_t curVideoCs_ = 0x120005a0u; /* =PP_SDL_CS_SRGB（默认 SDR 输出）*/
+    int      curPrimaries_ = 2;
+    int      curTrc_ = 2;
+    int      curMatrix_ = 0;
+    int      curFullRange_ = 0;
+    bool     curIsHdr_ = false;
+    bool     hdrOutputConfigured_ = false;
     int64_t            lastUploadedIndex_ = -1;
     double             lastTickEmit_ = 0.0;
     /* 最近一次 renderFrame 算出的画面矩形（letterbox 之后的位置与尺寸），

@@ -369,6 +369,19 @@ typedef struct PP_OverlayApi {
 /* ===========================================================================
  * 宿主能力表
  * =========================================================================== */
+/* video.color 服务类型（P2-L1） --------------------------------------------
+ * 内核经 register_service("video.color", ...) 暴露当前视频帧的色彩元数据，
+ * 插件用 get_service("video.color") 取这个结构体指针。结构稳定、以服务版本号
+ * 管理，**不进 PP_ABI_VERSION**。SDL_Colorspace 取值见 SDL_pixels.h。 */
+typedef struct PP_VideoColorService {
+    uint32_t (*current_colorspace)(void); /* 当前视频纹理的 SDL_Colorspace */
+    int      (*primaries)(void);          /* AVCOL_PRI_* */
+    int      (*transfer)(void);           /* AVCOL_TRC_* */
+    int      (*matrix)(void);             /* enum YuvMatrix (SWS_CS_*) */
+    int      (*full_range)(void);         /* 0=有限范围16-235, 1=全范围 */
+    int      (*is_hdr)(void);             /* 0/1：BT.2020 原色 + PQ/HLG 传输 */
+} PP_VideoColorService;
+
 typedef struct PP_HostApi {
     uint32_t     abi_version;
     uint32_t     struct_size;     /* 宿主填入 sizeof(PP_HostApi)，插件可据此判断字段可用性 */

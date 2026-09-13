@@ -122,9 +122,23 @@ struct YuvColorChoice {
     int matrix;
     /** 0 = 有限范围(16-235)，1 = 全范围(0-255)。对应 sws_setColorspaceDetails 的 srcRange。 */
     int fullRange;
+    /** enum AVColorPrimaries（FFmpeg）。默认 UNSPECIFIED=2。P2-L1：参与 HDR 判据。 */
+    int primaries = 2;
+    /** enum AVColorTransferCharacteristic（FFmpeg）。默认 UNSPECIFIED=2。
+     *  P2-L1：BT.2020 原色 + PQ(16)/HLG(18) 传输 → HDR。 */
+    int trc = 2;
 };
 
 YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int height);
+
+/** P2-L1：该色彩选择是否构成 HDR。
+ *  判据：BT.2020 原色(AVCOL_PRI_BT2020=9) + PQ(SMPTE2084=16) 或 HLG(ARIB_STD_B67=18)。
+ *  注意：SD 标称 BT.2020 原色但走 G22/BT.709 传输（trc=1/2）仍是 SDR。 */
+static inline bool isHdrColorChoice(const YuvColorChoice& c) {
+    return c.primaries == 9 /* AVCOL_PRI_BT2020 */
+        && (c.trc == 16      /* AVCOL_TRC_SMPTE2084 (PQ) */
+            || c.trc == 18   /* AVCOL_TRC_ARIB_STD_B67 (HLG) */);
+}
 
 /* ---- 同一套色彩选择到 SDL_Colorspace 的映射 ----
  * 走 NV12 纹理时 YUV→RGB 由 GPU 做，矩阵/范围必须**在建纹理时**告诉 SDL：
@@ -132,10 +146,16 @@ YuvColorChoice chooseYuvColor(int avColorSpace, int avColorRange, int width, int
  * SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER（NV12 纹理的**默认值是
  * SDL_COLORSPACE_JPEG**，即全范围 BT.601 —— 不显式设置就是错色）。
  *
+ * P2-L1 扩展：原色 + 传输函数决定"是不是 HDR"。BT.2020 原色 + PQ 传输 →
+ * SDL_COLORSPACE_HDR10（RGB_FULL_G2084_NONE_P2020，即 HDR10/PQ）；BT.2020 + HLG
+ * 则 SDL 没有专门的枚举，退回 BT.2020（矩阵正确，但传输函数按 G22 处理 —— 已知限制）。
+ * SDR 仍按矩阵 + 范围映射（行为与 P2-L1 前完全一致）。
+ *
  * 取值直接抄 SDL_pixels.h（本模块不 include SDL 头，以保持可移植、可单测）：
  *   BT601_LIMITED=0x211018c6  BT601_FULL=0x221018c6
  *   BT709_LIMITED=0x21100421  BT709_FULL=0x22100421
  *   BT2020_LIMITED=0x21102609 BT2020_FULL=0x22102609
+ *   SRGB=0x120005a0           SRGB_LINEAR=0x12000500  HDR10=0x12002600
  * SMPTE240M 与 FCC 在 SDL 里没有对应值 —— 退回 BT.601，并用 *fellBack 告知调用方
  * 打日志，避免"悄悄用错矩阵"。 */
 enum SdlColorSpaceId {
@@ -145,6 +165,9 @@ enum SdlColorSpaceId {
     PP_SDL_CS_BT709_FULL     = 0x22100421,
     PP_SDL_CS_BT2020_LIMITED = 0x21102609,
     PP_SDL_CS_BT2020_FULL    = 0x22102609,
+    PP_SDL_CS_SRGB           = 0x120005a0u,  /* 默认 SDR 输出（=SDL_COLORSPACE_SRGB）*/
+    PP_SDL_CS_SRGB_LINEAR    = 0x12000500u, /* HDR 输出（d3d11/d3d12/metal 支持，值可超 1.0）*/
+    PP_SDL_CS_HDR10          = 0x12002600u, /* RGB_FULL_G2084_NONE_P2020（BT.2020 + PQ）*/
 };
 
 int sdlColorspaceFor(const YuvColorChoice& c, int* fellBack);

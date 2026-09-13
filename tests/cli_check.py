@@ -344,11 +344,11 @@ def t_commands_live():
         return None, "没有正在运行的播放器"
     rc, txt = run_cli("commands")
     assert rc == 0, "退出码 %d" % rc
-    for kw in ("effect.set", "snapshot", "stats"):
+    for kw in ("effect.set", "snapshot", "stats", "quality.brightness"):
         assert kw in txt, "命令列表缺少 %r" % kw
     m = re.search(r"共 (\d+) 个命令", txt)
-    assert m and int(m.group(1)) == 20, "命令数应为 20，实际 %s" % (m.group(1) if m else "?")
-    return True, "退出码 0，20 个命令"
+    assert m and int(m.group(1)) == 26, "命令数应为 26，实际 %s" % (m.group(1) if m else "?")
+    return True, "退出码 0，26 个命令"
 
 
 def t_invoke_live():
