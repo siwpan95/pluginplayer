@@ -469,13 +469,15 @@ static int onTick(PP_EventCtx* ctx) {
 }
 
 static int onOsdDraw(PP_EventCtx* ctx) {
-    (void)ctx;
+    PP_Host* h = ctx->host;
     Snapshot s;
     {
         std::lock_guard<std::mutex> lk(g_snapMu);
         s = g_snap;
     }
+    /* 文案 + 状态色：转播=绿、空闲=灰、连不上=橙（一眼可辨，不依赖读文字） */
     std::string text;
+    PP_Color accent;
     if (!s.ok) {
         std::string base;
         {
@@ -483,19 +485,39 @@ static int onOsdDraw(PP_EventCtx* ctx) {
             base = g_base;
         }
         text = "RADIO: 服务不可达 (" + base + ")";
+        accent = PP_RGB(232, 150, 60);
     } else if (s.mode == "relay") {
         text = "RADIO: " + (s.name.empty() ? "(未知台名)" : s.name);
+        accent = PP_RGB(90, 210, 120);
     } else if (s.mode == "idle") {
         text = "RADIO: 空闲";
+        accent = PP_RGB(150, 150, 150);
     } else {
         text = "RADIO: " + s.mode;
+        accent = PP_RGB(150, 150, 150);
     }
-    float w = 0, h = 0;
-    if (!g_api->osd || g_api->osd->size(g_host, &w, &h) != 0) return 0;
-    if (w <= 0 || h <= 0) return 0;
-    g_api->osd->fill_rect(g_host, 8.0f, h - 36.0f, 300.0f, 26.0f, PP_RGBA(0, 0, 0, 150));
-    g_api->osd->text(g_host, 14.0f, h - 31.0f, text.c_str(),
-                     PP_RGB(90, 200, 120), 1.0f);
+
+    if (!g_api || !g_api->osd || !g_api->osd->size) return 0;
+    float w = 0, hh = 0;
+    /* 实测 size() 成功返回 1（写入 w/h），但 SDK 注释写反；安全做法是忽略返回值、只校验 w/h */
+    g_api->osd->size(h, &w, &hh);
+    if (w < 64.0f || hh < 40.0f) return 0;      /* 画布太小就不画，避免出界 */
+
+    /* 面板宽度按文字实测宽度自适应（text_width 在真字体与点阵回退下都返回真实像素） */
+    const float scale = 1.0f;
+    const float padX = 9.0f, dot = 9.0f, gap = 8.0f;
+    float tw = g_api->osd->text_width(h, text.c_str(), scale);
+    float boxH = 28.0f;
+    float boxW = padX * 2.0f + dot + gap + tw + 6.0f;
+    if (boxW > w - 16.0f) boxW = w - 16.0f;    /* 不超出画布 */
+    float x = 8.0f;
+    float y = hh - boxH - 8.0f;
+
+    g_api->osd->panel(h, x, y, boxW, boxH, PP_RGBA(0, 0, 0, 170), accent);
+    g_api->osd->fill_rect(h, x + padX, y + (boxH - dot) * 0.5f, dot, dot, accent);
+    g_api->osd->text(h, x + padX + dot + gap,
+                     y + (boxH - g_api->osd->line_height(h, scale)) * 0.5f,
+                     text.c_str(), accent, scale);
     return 0;
 }
 
