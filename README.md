@@ -408,6 +408,8 @@ pluginplayer/
 | `subtitles` | 订阅内核 `subtitle.ass(_header)` 事件 + `osd.draw`，用 **libass** 渲染完整样式字幕（字体/描边/阴影/对齐/覆盖标签 `\an \b \c…`）到叠加层；`subtitle.load` 命令把"加载外部字幕"请求发给内核；libass 不可用时回退 OSD 真字体 |
 | `track_selector` | 列出/切换音视频与字幕轨（`track.list` / `track.select`），通过控制通道暴露轨选择 |
 | `audio_device` | 枚举/切换音频输出设备（`audio.list` / `audio.set`），消费内核音频设备管理能力 |
+| `video_quality` | **画质链（按需挂帧处理器）**：亮度/对比度/饱和度/HDR 增益原地改写 RGBA；任一参数偏离默认才挂链、回默认即撤销；经 `video.color` 服务消费内核色彩元数据（HDR10/HLG/BT.709/601 矩阵+范围）；`quality.set`/`brightness`/`contrast`/`saturation`/`hdr` 命令 |
+| `radio_bridge` | 桥接 [private-radio-stations](https://gitee.com/siwpan/allin) 转播服务：worker 线程轮询 `/api/status`（winsock 直连，不进主线程）、台名→标题栏 + **OSD 状态面板**（转播绿/空闲灰/不可达橙 + 圆点指示 + 宽度自适应）、`radio.follow` 自动跟随收听（开转播自动 open `/hls`、停转播自动 stop）；`radio.status`/`base`/`poll`/`follow`/`playing` 命令 |
 
 ### JS 插件（`host-js/plugins/*.mjs`，Cordis）
 
@@ -437,17 +439,21 @@ pluginplayer/
 
 ```
 [PASS] sdl_init              — SDL3 video driver=windows
-[PASS] plugins_loaded        — 加载 6 个插件，失败 0 个
-[PASS] services_registered   — 服务 2 个
+[PASS] plugins_loaded        — 加载 10 个插件，失败 0 个
+[PASS] services_registered   — 服务 5 个
 [PASS] commands_registered   — 命令 31 个
 [PASS] open_media            — mp4 1280x720 30.00 fps dur=8.00 s codec=h264/aac
-[PASS] decode_and_display    — 显示 90 帧（目标 90，可接受下限 89；媒体约 240 帧可用），被插件丢弃 0 帧
-[PASS] seek                  — 目标 4.80 s，seek 后位置 5.05 s，新显示 5 帧 (上一帧 index=121)
+[PASS] decode_and_display    — 显示 60 帧（目标 60，可接受下限 59），解码 82 / 播放器丢帧 0 / 插件丢帧 0
+[PASS] seek                  — 目标 4.80 s，seek 后位置 4.89 s，新显示 5 帧 (上一帧 index=59)
 [PASS] plugin_commands       — snapshot -> 0  stats -> 0  effect.toggle gray -> 0
+[PASS] track_switch          — selectTrack(audio,1)=1，切换点解码 1 / 切换后 93（增长 92）
 [PASS] render_and_capture    — 渲染帧已抓屏保存: ...render_output.bmp (1280x720)；画面矩形 1280x720@(0,0) 内清屏色占比 0.00%（上限 80%）
-[PASS] plugin_hot_reload     — 重载后 订阅 4->4, 命令 15->15, 服务 2->2, 帧处理器 2->2（无泄漏）
+[PASS] font_render           — 中文'播'与'?'逐像素差异 692 个像素（阈值 30）—— 差异为 0 即说明中文被降级成 '?'
+[PASS] overlay_owner_revoke   — 渲染后 纹理红=1600 对照红=1600（阈值 800）；owner 撤销后 纹理红=0，图层数 1 -> 0
+[PASS] subtitle_render       — 近白像素 全帧 5179 / 底部带 5140（阈值 150）；已存 selftest_out/subtitle_render.bmp
+[PASS] plugin_hot_reload     — 重载后 订阅 15->15, 命令 31->31, 服务 5->5, 帧处理器 0->0（无泄漏）
 [PASS] reopen_media          — 二次打开后解码并显示 10 帧（目标 10，可接受下限 9），被插件丢弃 0 帧
-==== 自检结束: 11/11 项通过，跳过 0 项，用时 4.51 s ====
+==== 自检结束: 15/15 项通过，跳过 0 项，用时 12.09 s ====
 ```
 
 产物：`dist/selftest_out/` 下的 `selftest_report.json`、`frame_00{1,2,3}.png`
@@ -646,7 +652,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 ==== 机械门禁: 18/18 通过，跳过 0 项，失败 0 项 ====
 
 [PASS] bat-ascii-crlf       6 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR（含 start-dsh.bat）
-[PASS] plugin-manifest      6 个 DLL 哈希与清单逐一相符
+[PASS] plugin-manifest      10 个 DLL 哈希与清单逐一相符
 [PASS] plugin-command-count 注册 31 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
 [PASS] native-plugin-set    6 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
 [PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
@@ -661,7 +667,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
 [PASS] doc-links            27 条相对链接全部可解析
 [PASS] docs-index           4 份文档全部收录
-[PASS] readme-tree          目录结构里 56 个条目全部存在（按 basename 核对）
+[PASS] readme-tree          目录结构里 57 个条目全部存在（按 basename 核对）
 [PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/*.yml, ci.bat）
 ```
 
@@ -860,6 +866,8 @@ swscale 对 `yuv420p`（有限）/ `yuvj420p`（全范围）的默认处理本�
 
 **仍未处理（登记在「已知限制」）**：`color_primaries` / `color_trc` 内核完全不读 ——
 HDR / 广色域素材的传输函数与色域映射属于 P2-3，不在本轮范围。
+> 注：此条是 2026-09-12 当时的状态；`color_primaries`/`color_trc` 的读取与 `SDL_Colorspace` 映射
+> 已在 P2-L1（§22）实现。
 
 ### 16. 硬件解码（D3D11VA）—— 已接入，实测账如实列出（2026-09-12）
 
@@ -1072,6 +1080,40 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 
 （既有：`PP_WEB_REMOTE`、`PP_RPC_TOKEN`、`PP_PYTHON`、`PP_CLI_NO_INSTALL`、`PP_ROOT`。）
 
+### 22. P2-L1 画质链 + P2/P3 radio_bridge 集成（2026-09-13）
+
+**P2-L1 内核 HDR 色彩空间映射 + video_quality 画质插件（commit `bab6937`）**
+
+- 内核读 `AVFrame.color_primaries` / `color_trc`（`VideoFrame` 加字段，`player.cpp` 读 codecpar 回退），映射 `SDL_Colorspace`：BT.2020+PQ→HDR10(`0x12002600`)、BT.2020+HLG→BT2020（SDL 无 HLG 枚举，已知限制）、其余按矩阵+范围（与 P2-L1 前行为一致）。
+- 新增 `video.color` 服务（ABI 安全的 `get_service`，不进 `PP_ABI_VERSION`、不碰 `PP_MediaInfo`）：内核 App 快照最近帧色彩元数据并暴露 getter。
+- 新增 `video_quality` 插件（10 号原生插件）：亮度/对比度/饱和度/HDR 增益，仿 `video_effects` 的**按需挂链**（`qualityActive()` 判非默认才挂，链为空时渲染层走 NV12/GPU 路线，避免每帧多一次 RGBA 物化）；6 命令 + 1 服务。
+- HDR 输出重建：`ensureHdrOutput_()` 查 `SDL_GetDisplayProperties`/`HDR_enabled`，仅 HDR 显示器时把渲染器重建为 `SRGB_LINEAR`；否则维持 SDR（SDL 自动 HDR→SDR 色调映射，绝不抛错）。`hdrOutputConfigured_` 守卫只重建一次。
+- **诚实边界**：本机 selftest 用 SDL dummy 驱动、无真实 HDR 显示器，HDR 输出重建**无法肉眼验证**，靠单测（`test_color.cpp` 5 项 HDR 映射）+ 渲染器创建对 HDR10 不崩 + 优雅回退 SDR + SDR 无回归 + 门禁全绿覆盖。
+
+**P2 radio_bridge 插件（commit `840b277`）+ P0 app.quit 退出延迟（commit `1a8ac2a`）**
+
+- `radio_bridge`：worker 线程轮询 `/api/status`（winsock 直连，2s 超时，HTTP 不进主线程）；台名→标题栏 `set_window_subtitle` + OSD；`radio.follow` 自动跟随收听（开转播自动 open、停转播自动 stop、恢复自动 `play()`，3s 节流扛瞬时竞态）。
+- P0：`app.quit` 后保持连接的客户端退出延迟 30.5s→2.1s（`kIdleTimeoutMs` 30000→1000 + 去掉对客户端 socket 的 `::shutdown` 循环）。
+
+**P3-a 内核网络流探测窗口（commit `2271ab8`）+ radio 面板「本机监听」（radio 仓库 commit `dcf75e1`）**
+
+- 内核：FFmpeg 9 把 `AVFormatContext.analyzeduration` 改名为 `max_analyze_duration`，原代码未设→0，慢启动流（刚开播电台 `/stream`）在拿到完整帧前放弃。修为 3s 探测上限 + 8MB probesize；对本地/热流不增延迟，只救 0.5–3s 才出帧的边界。
+- radio 面板：`monitor` 插件 spawn `pluginplayer.exe --hidden --allow-network-input --rpc-port`，RPC 控制 `player.open/stats/stop` + `app.quit`，跟随转播（`relay:start` 自动收听、`relay:stop` 自动停）。
+- **决定性实测**：监听默认挂载点定为 **`/hls`**——`/stream` 每个连接都是新的 ffmpeg 冷拉源（首帧 5–15s），探测窗口内必失败；HLS 读 radio 自己的热切片，首次失败后重试即成功。
+- 顺带修 radio 应用级闸门既有缺陷：`apps/audio/scripts/check.mjs` 用裸 `js-yaml.load`（默认 schema）不支持 `!!js`，与运行时 `parseCordisYml` 不一致 → 复用 `parseCordisYml`，check 由红转绿。
+
+**P3-b radio_bridge OSD 台名样式（commit `02b62cf`）**
+
+- 状态配色：转播中=绿、空闲=灰、服务不可达=橙；左侧 9px 圆点指示；面板宽度按 `text_width` 实测自适应。
+- **关键修复**：`Osd::size()` 的 C 包装成功返回 **1**（SDK 注释"返回 0 = 不可绘制"写反），原实现 `if (!size()) return 0` 把成功当失败、面板完全不画；改为与 `osd_stats` 一致忽略返回值、只校验 `w/h > 0`。
+- 验证：`render_output.bmp`（**最终合成帧**，非 `frame_*.png` 原始帧）目视确认左下角橙色不可达面板条。
+
+**P3-c radio_bridge 默认 base 改 8000（commit `f70482c`）**
+
+- 默认 base `127.0.0.1:8760`→`127.0.0.1:8000`，与 private-radio-stations 默认 HTTP 端口一致；端口冲突时仍可用 `radio.base <url>` 或 ini 覆盖。
+
+**验证（P2-L1 + P3 全量回归，2026-09-13）**：verify 18/18、unit 103/103、cli_check 24/24、selftest 15/15；radio 端到端 7/7、`npm run check` PASSED、单测 9/9。
+
 ---
 
 ## 与原 playerdemo 的差异
@@ -1115,10 +1157,11 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
   小窗口：seek 后**视频流损坏/解码器卡死**时预热会在 2 s 超时后放开时钟（记 WARN），
   这时表现与修复前一致。
 - **字幕已接入**：`subtitles` 插件订阅内核 `subtitle.ass(_header)` 事件，用 libass 渲染完整样式字幕（含字体/描边/阴影/对齐/覆盖标签，见验证结果 §21）；内核只解码、把字幕以事件总线暴露，渲染在插件内完成，不进 ABI。
-- **色彩只处理矩阵与电平范围，不处理色域与传输函数**：`AVFrame.color_primaries` /
-  `color_trc` 内核**完全不读**（只读 `colorspace` / `color_range`，见验证结果第 15 节）。
-  因此 HDR（PQ/HLG）与广色域（BT.2020 原始色域）素材会被按 SDR 处理 —— 表现为过曝或发灰。
-  正确做法是 libplacebo 级的色调映射，属于 P2-3，不在本轮范围。
+- **色彩：矩阵 + 范围 + 传输函数/色域标注已读，但无色调映射**：P2-L1（§22）起内核已读
+  `AVFrame.color_primaries` / `color_trc` 并映射 `SDL_Colorspace`（BT.2020+PQ→HDR10、BT.2020+HLG→BT2020），
+  HDR 显示器下渲染器会重建为 `SRGB_LINEAR`。**但**没有 libplacebo 级的显式色调映射（tone-mapping），
+  所以 HDR→SDR 的显示侧转换交给 SDL 自动处理；非 HDR 显示器上 HDR 素材仍可能偏曝/发灰。
+  完整 libplacebo 色调映射属于后续工作。
 - 无播放列表 UI；用控制通道或命令扩展。
 - 单文件播放；跨文件续播由 `auto-resume` 插件负责但不做自动切集。
 - JS 侧 `npm install` 需要网络（`cordis` 与 `@cordisjs/plugin-loader` 从 npm 拉取）。
