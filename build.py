@@ -42,7 +42,8 @@ CORE_SOURCES = [
 
 # 插件目录名 -> 输出 DLL 名
 PLUGINS = ["osd_stats", "video_effects", "audio_viz", "snapshot", "hotkey_ext",
-           "subtitles", "track_selector", "audio_device", "video_quality"]
+           "subtitles", "track_selector", "audio_device", "video_quality",
+           "radio_bridge"]
 
 # tests/ 下的冒烟测试：编译后立即运行，退出码 0 视为通过。
 # 早期版本这两个文件不被任何脚本引用 —— 等于没有测试入口。
@@ -114,6 +115,7 @@ LDFLAGS_PLUGIN = ["-shared"] + STATIC_RUNTIME
 # （libass.dll.a），运行时由 Windows 加载器从 dist/ 解析 libass-9.dll 及其闭包。
 PLUGIN_EXTRA_LDFLAGS = {
     "subtitles": ["-Lvendor/libass/lib", "-lass"],
+    "radio_bridge": ["-lws2_32"],   # winsock 直连 radio 服务 /api/status
 }
 
 # 需要 vendor/libass 才能编译的插件（缺依赖时给出明确报错而不是一堆找不到 include 的噪声）

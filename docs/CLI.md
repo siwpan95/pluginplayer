@@ -378,7 +378,7 @@ F:\Python314\python.exe tests\cli_check.py
 | plugins | 离线加载报告：发现 5 / 成功 5 / 失败 0 |
 | selftest | 样例可自动生成（2804.6 KB） |
 | install/uninstall | `--dry-run` 目标目录正确；装→卸后目录为空；**不删他人同名文件** |
-| 控制通道 | `status`（info/stats/volume 齐备，duration=8.00s）、`seek`（相对+绝对）、`commands`（26 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`（收到 app.tick） |
+| 控制通道 | `status`（info/stats/volume 齐备，duration=8.00s）、`seek`（相对+绝对）、`commands`（31 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`（收到 app.tick） |
 
 需要 `dist/` 或运行中播放器的用例在这些前提缺失时记为 `SKIP` 并**不计入通过数**
 （跳过 ≠ 通过，与项目 `--selftest` 的口径一致）。
