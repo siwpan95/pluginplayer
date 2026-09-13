@@ -41,6 +41,9 @@ selftest_out/
 # ---- 临时/证据文件 ----
 __pycache__/
 *.py[cod]
+
+# ---- 生成的测试媒体（build.py / selftest.bat 用 ffmpeg 现生成，绝不应入库） ----
+/test_assets/
 _pt_*.txt
 _pt_*.ps1
 _build_*.txt
