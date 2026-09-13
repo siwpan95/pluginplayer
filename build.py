@@ -43,7 +43,7 @@ CORE_SOURCES = [
 # 插件目录名 -> 输出 DLL 名
 PLUGINS = ["osd_stats", "video_effects", "audio_viz", "snapshot", "hotkey_ext",
            "subtitles", "track_selector", "audio_device", "video_quality",
-           "radio_bridge"]
+           "radio_bridge", "video_tonemap"]
 
 # tests/ 下的冒烟测试：编译后立即运行，退出码 0 视为通过。
 # 早期版本这两个文件不被任何脚本引用 —— 等于没有测试入口。
@@ -72,6 +72,7 @@ UNIT_TEST_SOURCES = [
     "tests/unit/test_registry.cpp",
     "tests/unit/test_config.cpp",
     "tests/unit/test_utf8.cpp",  # P1-a UTF-8 解码与全宽判定
+    "tests/unit/test_tonemap.cpp",  # P2-3 Phase1: HDR→SDR 色调映射纯数学
 ]
 # 单元测试不需要 SDL3 / FFmpeg 的头文件，但 util.cpp 用了 bcrypt 做 SHA-256
 LDFLAGS_UNIT = ["-lbcrypt"] + ["-static-libgcc", "-static-libstdc++",

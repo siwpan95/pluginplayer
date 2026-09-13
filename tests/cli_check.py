@@ -348,8 +348,8 @@ def t_commands_live():
     for kw in ("effect.set", "snapshot", "stats", "quality.brightness", "radio.status"):
         assert kw in txt, "命令列表缺少 %r" % kw
     m = re.search(r"共 (\d+) 个命令", txt)
-    assert m and int(m.group(1)) == 31, "命令数应为 31，实际 %s" % (m.group(1) if m else "?")
-    return True, "退出码 0，31 个命令"
+    assert m and int(m.group(1)) == 35, "命令数应为 35，实际 %s" % (m.group(1) if m else "?")
+    return True, "退出码 0，35 个命令"
 
 
 def t_invoke_live():
@@ -360,6 +360,27 @@ def t_invoke_live():
     rc, txt = run_cli("cmd", "no.such.command")
     assert rc == pp_cli.E_REMOTE, "不存在的命令应退 %d，实际 %d" % (pp_cli.E_REMOTE, rc)
     return True, "真实命令退 0，不存在的命令退 5"
+
+
+def t_tonemap_live():
+    """video_tonemap 插件接线：命令可用、mode 切换不崩、切换后播放器仍活。
+
+    帧处理量的像素级验证在 tests/unit/test_tonemap.cpp（115 项单测）；
+    这里的 command.invoke 只回 return 码，日志不随 RPC 返回，故只做 rc 级断言。
+    """
+    if not player_running():
+        return None, "没有正在运行的播放器"
+    rc, txt = run_cli("cmd", "tonemap.status")
+    assert rc == 0, "tonemap.status 退出码 %d\n%s" % (rc, txt[:400])
+    rc, _ = run_cli("cmd", "tonemap.mode", "on")
+    assert rc == 0, "tonemap.mode on 失败"
+    rc, _ = run_cli("cmd", "tonemap.mode", "auto")
+    assert rc == 0, "tonemap.mode auto 失败"
+    rc, _ = run_cli("cmd", "tonemap.mode", "bogus")
+    assert rc == 1, "命令存在但 return=-1 时 CLI 应退 E_FAIL(1)，实际 %d" % rc
+    rc, txt = run_cli("cmd", "tonemap.status")
+    assert rc == 0, "切换后 tonemap.status 退出码 %d" % rc
+    return True, "mode on/auto 切换后播放器存活、命令均可用"
 
 
 def t_events_live():
@@ -547,6 +568,7 @@ def main():
     case("控制通道: seek", t_seek_live)
     case("控制通道: commands", t_commands_live)
     case("控制通道: cmd 调用与失败码", t_invoke_live)
+    case("控制通道: video_tonemap 接线", t_tonemap_live)
     case("控制通道: events", t_events_live)
     case("控制通道: quit 保持连接也快速退出", t_quit_open_connection_fast)
 

@@ -43,14 +43,14 @@
 :: 1) 准备依赖（首次；本机已有压缩包时会直接复用）
 F:\Python314\python.exe tools\fetch_deps.py
 
-:: 2) 构建（内核 + 10 个原生插件 + 打包 dist/）
+:: 2) 构建（内核 + 11 个原生插件 + 打包 dist/）
 F:\Python314\python.exe build.py
 
 :: 2b) 冒烟测试（编译并运行 tests/ 下两个冒烟程序，几秒钟）
 F:\Python314\python.exe build.py --smoke
 
 :: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
-::     实测产物 56 个文件 / 146 MB（不带 --release 时 dist/ 会累积日志与自检证据）
+::     实测产物 57 个文件 / 146 MB（不带 --release 时 dist/ 会累积日志与自检证据）
 F:\Python314\python.exe build.py --release
 
 :: 3) 播放（把视频拖到 run.bat 上，或：）
@@ -347,7 +347,7 @@ pluginplayer/
 │  │  ├─ osd.cpp/h                    叠加层绘制（文字/面板/矩形/频谱柱）
 │  │  ├─ control.cpp/h                ★ 控制通道（JSON-RPC over TCP）
 │  │  └─ config.cpp/h  util.cpp/h      配置持久化 / 日志 / PNG 写出
-│  └─ plugins/                         10 个原生插件（各自独立 .cpp → .dll）
+│  └─ plugins/                         11 个原生插件（各自独立 .cpp → .dll）
 ├─ host-js/                            进程外 JS 插件宿主（Cordis）
 │  ├─ src/player-service.mjs           ctx.player 服务（控制通道客户端）
 │  ├─ src/index.mjs                    宿主入口（装载/卸载插件）
@@ -410,6 +410,7 @@ pluginplayer/
 | `audio_device` | 枚举/切换音频输出设备（`audio.list` / `audio.set`），消费内核音频设备管理能力 |
 | `video_quality` | **画质链（按需挂帧处理器）**：亮度/对比度/饱和度/HDR 增益原地改写 RGBA；任一参数偏离默认才挂链、回默认即撤销；经 `video.color` 服务消费内核色彩元数据（HDR10/HLG/BT.709/601 矩阵+范围）；`quality.set`/`brightness`/`contrast`/`saturation`/`hdr` 命令 |
 | `radio_bridge` | 桥接 [private-radio-stations](https://gitee.com/siwpan/allin) 转播服务：worker 线程轮询 `/api/status`（winsock 直连，不进主线程）、台名→标题栏 + **OSD 状态面板**（转播绿/空闲灰/不可达橙 + 圆点指示 + 宽度自适应）、`radio.follow` 自动跟随收听（开转播自动 open `/hls`、停转播自动 stop）；`radio.status`/`base`/`poll`/`follow`/`playing` 命令 |
+| `video_tonemap` | **CPU 色调映射（Phase 1）**：HDR（PQ/HLG）→ SDR 的 BT.2390 族 EETF + gamut 软钳 + sRGB，帧链原地处理；`mode=auto` 只在源是 HDR 时挂链（SDR 源不破坏 NV12/GPU 快路径）；`tonemap.mode`/`strength`/`peak`/`status` 命令。Phase 2 换 libplacebo GPU 后端（见 §23） |
 
 ### JS 插件（`host-js/plugins/*.mjs`，Cordis）
 
@@ -439,9 +440,9 @@ pluginplayer/
 
 ```
 [PASS] sdl_init              — SDL3 video driver=windows
-[PASS] plugins_loaded        — 加载 10 个插件，失败 0 个
+[PASS] plugins_loaded        — 加载 11 个插件，失败 0 个
 [PASS] services_registered   — 服务 5 个
-[PASS] commands_registered   — 命令 31 个
+[PASS] commands_registered   — 命令 35 个
 [PASS] open_media            — mp4 1280x720 30.00 fps dur=8.00 s codec=h264/aac
 [PASS] decode_and_display    — 显示 60 帧（目标 60，可接受下限 59），解码 82 / 播放器丢帧 0 / 插件丢帧 0
 [PASS] seek                  — 目标 4.80 s，seek 后位置 4.89 s，新显示 5 帧 (上一帧 index=59)
@@ -451,7 +452,7 @@ pluginplayer/
 [PASS] font_render           — 中文'播'与'?'逐像素差异 692 个像素（阈值 30）—— 差异为 0 即说明中文被降级成 '?'
 [PASS] overlay_owner_revoke   — 渲染后 纹理红=1600 对照红=1600（阈值 800）；owner 撤销后 纹理红=0，图层数 1 -> 0
 [PASS] subtitle_render       — 近白像素 全帧 5179 / 底部带 5140（阈值 150）；已存 selftest_out/subtitle_render.bmp
-[PASS] plugin_hot_reload     — 重载后 订阅 15->15, 命令 31->31, 服务 5->5, 帧处理器 0->0（无泄漏）
+[PASS] plugin_hot_reload     — 重载后 订阅 15->15, 命令 35->35, 服务 5->5, 帧处理器 0->0（无泄漏）
 [PASS] reopen_media          — 二次打开后解码并显示 10 帧（目标 10，可接受下限 9），被插件丢弃 0 帧
 ==== 自检结束: 15/15 项通过，跳过 0 项，用时 12.09 s ====
 ```
@@ -627,7 +628,7 @@ pluginplayer/
 - **装卸回归**：`install-cli` → `uninstall-cli` 后目录必须为空；且往目标目录放一个
   **别人手工写的同名 `pluginplayer.cmd`**，卸载时必须跳过、不能误删。
 - **真跑控制通道**：`status`（info/stats/volume 齐备）、`seek`（相对 + 绝对）、
-  `commands`（断言恰好 31 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`
+  `commands`（断言恰好 35 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`
   （断言真收到 `app.tick`）。
 
 需要 `dist/` 或运行中播放器的用例在前提缺失时记 `SKIP` 且**不计入通过数**
@@ -646,29 +647,29 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 
 `quit` 之后复查端口：`port 7911 已释放，播放器已退出`。
 
-### 11. 机械门禁 `tools/verify.py` —— 18/18 通过，自检 19/19
+### 11. 机械门禁 `tools/verify.py` —— 18/18 通过
 
 ```
 ==== 机械门禁: 18/18 通过，跳过 0 项，失败 0 项 ====
 
 [PASS] bat-ascii-crlf       6 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR（含 start-dsh.bat）
-[PASS] plugin-manifest      10 个 DLL 哈希与清单逐一相符
-[PASS] plugin-command-count 注册 31 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
-[PASS] native-plugin-set    6 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
-[PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
-[PASS] release-payload      21 个文件 / 129 MB，与 README 的 22 / 130 MB 一致
-[PASS] portable-modules     20 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
-[PASS] no-credentials       82 个文本文件已扫描，未发现硬编码凭据
-[PASS] arg-bounds-align     13 项边界与 C++ 源码一致
+[PASS] plugin-manifest      11 个 DLL 哈希与清单逐一相符
+[PASS] plugin-command-count 注册 35 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
+[PASS] native-plugin-set    11 个：audio_device, audio_viz, hotkey_ext, osd_stats, radio_bridge, snapshot, subtitles, track_selector, video_effects, video_quality, video_tonemap；dist/plugins 一致
+[PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs），README 声明与实际一致
+[PASS] release-payload      57 个文件 / 145.8 MB，与 README 的 57 / 146 MB 一致
+[PASS] portable-modules     21 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
+[PASS] no-credentials       103 个文本文件已扫描，未发现硬编码凭据
+[PASS] arg-bounds-align     13 项边界与 C++ 源码一致（窗口最小边、窗口最大边、自检帧数上限、音量下界 …）
 [PASS] rpc-methods-align    实现 23 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
-[PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应
+[PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应，且都有含义说明
 [PASS] cli-commands-align   25 个命令，README 与 docs/CLI.md 的表与实现一致
-[PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 2；Cordis 4.0.0-rc.9
+[PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 3；Cordis 4.0.0-rc.9 —— 与 README 依赖表 / ARCHITECTURE.md 声明一致
 [PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
-[PASS] doc-links            27 条相对链接全部可解析
+[PASS] doc-links            34 条相对链接全部可解析
 [PASS] docs-index           4 份文档全部收录
 [PASS] readme-tree          目录结构里 57 个条目全部存在（按 basename 核对）
-[PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/*.yml, ci.bat）
+[PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/pluginplayer-ci.yml, ci.bat）
 ```
 
 **门禁自己也要被验证。** `--selfcheck` 对每条门禁做一次故意破坏，断言它必须报红：
@@ -1114,6 +1115,47 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 
 **验证（P2-L1 + P3 全量回归，2026-09-13）**：verify 18/18、unit 103/103、cli_check 24/24、selftest 15/15；radio 端到端 7/7、`npm run check` PASSED、单测 9/9。
 
+### 23. P2-3 色调映射两阶段：Phase 1 CPU（已交付）+ Phase 2 libplacebo GPU（计划）
+
+**Phase 1（2026-09-14，11 号原生插件 `video_tonemap`，纯数学零依赖）**
+
+- HDR（PQ / HLG）→ SDR 的色调映射跑在**帧链**上：PQ EOTF 逆（ST 2084）/ HLG OETF+OOTF 逆
+  → 按源峰值归一 → BT.2390 族 Reinhard-extended EETF（软膝 k=0.18）→ gamut 软钳（沿亮度
+  向白点去饱和，防色相偏移）→ sRGB EOTF 逆（piecewise）。
+- `mode=auto`（默认）只在源是 HDR（内核 `video.color` 服务 `is_hdr` + PQ/HLG 传输函数）时
+  挂帧处理器；SDR 源完全不挂链，**不破坏 NV12/GPU 快路径**。`mode=on` 强制（预览/测试），
+  `mode=off` 直通（真实 HDR 显示器想走原生直通时用）。
+- 命令：`tonemap.mode`（auto/on/off）、`tonemap.strength`（0..1 与原画面混合）、
+  `tonemap.peak`（100..10000 nits，默认 1000）、`tonemap.status`。帧链优先级 90
+  （先于 video_quality 的 100，色调映射后再调画质）。
+- **诚实边界**：① "BT.2390 族"是 Reinhard-extended 软膝，不是 BT.2390 报告逐段精确实现；
+  ② 不做 BT.2020→BT.709 基色矩阵（饱和色会偏淡）；③ 帧链像素是 8-bit RGBA（物化路径），
+  PQ 在 8-bit 有量化带隙；④ 显示端是 SDR 还是 HDR 不自动探测（auto 只看源），真实 HDR
+  显示器请 `tonemap.mode off` 走 SDL 直通。
+- **验证**：`tests/unit/test_tonemap.cpp` 12 项像素级单测（PQ 端点/往返/单调、HLG 已知值、
+  EETF 已知值与超界滚降、sRGB 已知值、软钳不变式、端到端已知字节：PQ 100nits→174、
+  HLG 128→140、白点→255、strength 混合与单调）→ 单测总数 103→**115**；E2E 实测
+  `mode=on` 后 17 帧经帧链处理（`seen=17 processed=17`）；selftest 15/15（11 插件/35 命令
+  /热重载无泄漏）；verify 18/18；cli_check 30/30（含 tonemap 接线常驻用例）。
+
+**Phase 2（计划：换 libplacebo GPU 后端，补齐 Phase 1 的四条边界）**
+
+- 可行性已核验（2026-09-14）：MSYS2 mingw64 有 `mingw-w64-x86_64-libplacebo` 7.360.1
+  （`libplacebo-360.dll` + 全套头文件含 `d3d11.h`/`shaders/colorspace.h`/`gamut_mapping.h`/
+  `tone_mapping.h` + `libplacebo.dll.a` + pkgconfig，包 SHA256
+  `4a3e80c3…dc2453`）。本机无 pacman 也没关系——`fetch_deps.py` 直接拉 `.pkg.tar.zst`
+  解包进 `vendor/libplacebo/` 即可，不需要 MSYS2 安装。
+- 代价：拖运行时依赖 lcms2 / libdovi / shaderc / spirv-cross / vulkan-1（发货约 +6-8 个
+  DLL、+15-25 MB），发布载荷口径随之更新。
+- 集成点：D3D11 后端（`libplacebo/d3d11.h`）对接 SDL3 渲染器，把 HDR 纹理交给
+  `pl_renderer` 做 GPU 色调映射（真 BT.2390 / spline / gamut map / dithering），替换
+  Phase 1 的 8-bit CPU 帧链路径。
+- **验证前提（为什么现在不做）**：libplacebo 只有 GPU 后端（Vulkan/D3D11/OpenGL），其
+  dummy 后端只记录命令、不算像素 → 本机（selftest 用 SDL dummy 驱动、无真实 HDR 显示器）
+  **无法对其色调映射输出做像素级断言**，只能证明"能编+不崩"。这与"每条声明配可复现证据"
+  的红线冲突，故 Phase 2 等有真实 HDR/Vulkan 测试环境再落地；Phase 1 先以可验证的方式
+  解决"SDR 屏上 HDR 素材过曝/发灰"的实际问题。
+
 ---
 
 ## 与原 playerdemo 的差异
@@ -1123,7 +1165,7 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 | 框架 | Qt5.12 界面 + qmake | 无 GUI 框架，SDL3 直接画 |
 | 解码 API | FFmpeg 3.4（`avcodec_decode_video2` 等，已删除） | FFmpeg 9.0.1（`send_packet/receive_frame`、`AVChannelLayout`） |
 | 渲染/音频 | SDL2.0.7 | SDL3.4.16（`SDL_AudioStream` + 频率比变速） |
-| 可扩展性 | 功能写死在 `videoctl.cpp` | **全部功能插件化**，10 个原生插件 + 3 个 JS 插件 |
+| 可扩展性 | 功能写死在 `videoctl.cpp` | **全部功能插件化**，11 个原生插件 + 3 个 JS 插件 |
 | 外部控制 | 无 | JSON-RPC 控制通道 |
 | 精确 seek | 无 | 有（seek 后丢帧对齐，`dropBefore_`） |
 | 硬件解码 | 无 | **有**（D3D11VA，自动回退软解；实测减少丢帧，见验证结果 §16） |
