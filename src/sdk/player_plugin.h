@@ -172,6 +172,19 @@ enum PP_DispatchMode {
 #define PP_TOPIC_UI_RESIZE      "ui.resize"     /* EMIT */
 #define PP_TOPIC_OSD_DRAW       "osd.draw"      /* EMIT：插件在此绘制叠加层 */
 
+/* P1-e：libass 字幕渲染（能力通道，不进 ABI）。
+ * 内核把 FFmpeg 解出的字幕包以两条事件暴露给 subtitles 插件（插件用 libass 渲染），
+ * 与既有 subtitle.line（纯文本）并存 —— 旧插件只用 subtitle.line 不受影响。
+ *   - PP_TOPIC_SUBTITLE_ASS_HEADER：JSON {"header":"<完整 ASS 头>"}，一条媒体发一次
+ *     （seek/换轨后重发，插件据此重置 libass track）。头含 PlayResX/Y 与默认样式，
+ *     默认样式字体 = PP_SUBTITLE_FONT_FAMILY（插件把同名字体注册进 libass）。
+ *   - PP_TOPIC_SUBTITLE_ASS：JSON {"line":"Dialogue: 0,<start>,<end>,Default,,0,0,0,,<text>"}，
+ *     每解出一条字幕发一次；<text> 保留 ASS 覆盖标签（\an \b \c 等）。 */
+#define PP_TOPIC_SUBTITLE_ASS_HEADER "subtitle.ass_header"
+#define PP_TOPIC_SUBTITLE_ASS       "subtitle.ass"
+/* 插件注册进 libass 的字体家族名，必须与内核 ASS 头里 Default 样式的 Fontname 一致。 */
+#define PP_SUBTITLE_FONT_FAMILY     "PluginPlayerSub"
+
 /* P1-d：多轨与音频设备选择 */
 #define PP_TOPIC_MEDIA_TRACKS    "media.tracks"   /* EMIT：全部 视频/音频/字幕 轨列表（JSON 数组） */
 #define PP_TOPIC_MEDIA_TRACK_SEL "media.track_selected" /* EMIT：用户切换了某轨 {type,index} */

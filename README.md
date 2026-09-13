@@ -50,7 +50,7 @@ F:\Python314\python.exe build.py
 F:\Python314\python.exe build.py --smoke
 
 :: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
-::     实测产物 22 个文件 / 130 MB（不带 --release 时 dist/ 会累积日志与自检证据）
+::     实测产物 54 个文件 / 146 MB（不带 --release 时 dist/ 会累积日志与自检证据）
 F:\Python314\python.exe build.py --release
 
 :: 3) 播放（把视频拖到 run.bat 上，或：）
@@ -405,6 +405,9 @@ pluginplayer/
 | `audio_viz` | 订阅 `audio.samples` 拿 PCM + **自实现 FFT** + 在 `osd.draw` 画频谱/波形（插件不链接任何第三方库） |
 | `snapshot` | `acquire_frame/release_frame` 取帧副本 + 宿主 `save_png` 写图 + `config_get/set` 持久化 + 帧处理链画标记框 |
 | `hotkey_ext` | 订阅 `ui.key` 并 `consumed=1` **吞掉按键**（BAIL 语义）+ 注册 `hotkeys` 服务 + **调用其它插件的命令** |
+| `subtitles` | 订阅内核 `subtitle.ass(_header)` 事件 + `osd.draw`，用 **libass** 渲染完整样式字幕（字体/描边/阴影/对齐/覆盖标签 `\an \b \c…`）到叠加层；`subtitle.load` 命令把"加载外部字幕"请求发给内核；libass 不可用时回退 OSD 真字体 |
+| `track_selector` | 列出/切换音视频与字幕轨（`track.list` / `track.select`），通过控制通道暴露轨选择 |
+| `audio_device` | 枚举/切换音频输出设备（`audio.list` / `audio.set`），消费内核音频设备管理能力 |
 
 ### JS 插件（`host-js/plugins/*.mjs`，Cordis）
 
@@ -1033,6 +1036,32 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 
 另注：**微软雅黑（`msyh.ttc`）版权属方正，不可随包分发** —— 这是字体方案的第一条红线。
 
+### 21. libass 字幕渲染（P1-e）：完整样式 + 随包字体机制
+
+**架构（不变）**：内核只解码字幕、把字幕以事件总线暴露（`subtitle.ass_header` 每条媒体发一次，含完整 ASS 头与默认样式；`subtitle.ass` 每解出一条 Dialogue 发一次）；渲染在本 `subtitles` 插件内用 libass 完成，经 overlay 图层叠加到视频画面（不碰内核渲染代码）。内核不链接 libass、不升 ABI。
+
+**字体机制（本 libass 0.17.5 / MSYS2 meson 构建实测踩坑后的定稿）**：
+
+1. 最初用 `ass_add_font`（把 TTF 读进内存注册为 memory font）+ `ASS_FONTPROVIDER_NONE`，报 `fontselect: failed to find any fallback with glyph 0x0` —— 字体取不到字形。
+2. 对照实验（已全部实测验证）发现三件事：
+   - `ASS_FONTPROVIDER_NONE` 会把内存字体一并抑制：memory font 根本不进 fontselect；
+   - `ASS_FONTPROVIDER_AUTODETECT` 在本机启用 **DirectWrite（with GDI）** 系统 provider，且会**覆盖**内存字体（回退到系统 Arial）；
+   - **`ass_add_font` 注册的 memory font 一旦在渲染时被真正选中，会触发 0xC0000005 访问违规崩溃**（4 种组合全部崩）。
+3. 本构建也**没有 `ass_attach_font`**（track attachment API 缺失），内嵌 attachment 路线也走不通。
+4. **最终稳定方案**：`ass_set_fonts_dir(lib, "<asset_dir>/fonts")` + `ASS_FONTPROVIDER_AUTODETECT` —— 由系统 provider（DirectWrite / fontconfig）扫描随包字体目录加载，零崩溃、跨平台、无需 fontconfig 配置、不用内存字体。验证时 fontselect 打印 `(HappyZcool-2016, 400, 0) -> HappyZcool-2016` 与 `(700, 0) -> HappyZcool-2016`。
+
+**内核/字体解耦（哨兵替换）**：内核 ASS 头统一用哨兵家族名 `PP_SUBTITLE_FONT_FAMILY = "PluginPlayerSub"`（宏在 `player_plugin.h`）；插件收到 `subtitle.ass_header` 时把该哨兵**替换为随包字体的真实 family 名** `HappyZcool-2016`，使内核与具体字体解耦——内核只发中性哨兵、插件拥有真实字体。换随包字体只改插件侧常量 `PP_BUNDLED_FONT_REAL`。
+
+**字体事实**：随包 `assets/fonts/ZCOOLKuaiLe-Regular.ttf`（站酷快乐体 2016 修订版）的 name 表只有 Mac-Roman nameID 1 = **"HappyZcool-2016"**，与文件名 `ZCOOLKuaiLe` 不同——必须以 name 表为准（这是 P1-a 已记录的"stb_truetype 只认 TrueType glyf"之外的第二处字体坑）。字体缺失不致命：libass 回退系统字体，只是 CJK 可能缺字形。
+
+**发布物**：dist/ 随包 32 个 libass 字幕栈 DLL（libass + freetype / harfbuzz / fontconfig / fribidi / glib / pcre2 / brotli 等依赖闭包），与 8 个插件、FFmpeg/SDL3/MinGW 运行时一并分发。`SOURCES.md`（字体来源/许可说明）已从 `assets/fonts/` 移出，避免 libass 扫描时对其报 `Error opening memory font`。
+
+**实测**
+
+- 验收 harness `tools/test_libass_render.cpp`（复刻插件真实机制：fonts_dir + AUTODETECT，不用 ass_add_font）重编后运行：**rc=0，渲染出 22574 个有效像素**，fontselect 确认随包字体命中（常规 + 粗体），中英混排 + 覆盖标签（`\an8 \b1 \c&H00FF00&`）可见。
+- `subtitles` 插件编译 **946 KB、无 `-Wall -Wextra` 警告**；`build.py --release` 全量 8 插件 + 打包通过，发布载荷 **54 个文件 / 146 MB**。
+- 门禁不受影响：原生插件数 8、命令数 20 均未变（libass 是新增依赖，已补进 `THIRD_PARTY_NOTICES.md` 并刷新发布载荷口径）。
+
 ### 19. 环境变量一览（新增）
 
 | 变量 | 作用 |
@@ -1085,7 +1114,7 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 - **seek 之后有预热了**（主时钟冻结 + 音频暂停，见验证结果 §18）。但仍有一个已知的
   小窗口：seek 后**视频流损坏/解码器卡死**时预热会在 2 s 超时后放开时钟（记 WARN），
   这时表现与修复前一致。
-- 不解析字幕（`.srt`/`.ass`），只画 OSD；字幕可作为下一个插件接入（`PP_TOPIC_VIDEO_FRAME` + OSD 已够用）。
+- **字幕已接入**：`subtitles` 插件订阅内核 `subtitle.ass(_header)` 事件，用 libass 渲染完整样式字幕（含字体/描边/阴影/对齐/覆盖标签，见验证结果 §21）；内核只解码、把字幕以事件总线暴露，渲染在插件内完成，不进 ABI。
 - **色彩只处理矩阵与电平范围，不处理色域与传输函数**：`AVFrame.color_primaries` /
   `color_trc` 内核**完全不读**（只读 `colorspace` / `color_range`，见验证结果第 15 节）。
   因此 HDR（PQ/HLG）与广色域（BT.2020 原始色域）素材会被按 SDR 处理 —— 表现为过曝或发灰。

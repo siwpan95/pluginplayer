@@ -90,14 +90,46 @@ PluginPlayer 自身代码以 **`GPL-3.0-or-later`** 分发，见 [LICENSE](LICEN
 
 | 文件 |
 |---|
-| `assets/fonts/SOURCES.md` |
+| `assets/SOURCES.md` |
 | `assets/fonts/ZCOOLKuaiLe-Regular.ttf` |
 | `config/pluginplayer.ini` |
+| `libasprintf-0.dll` |
+| `libass-9.dll` |
+| `libbrotlicommon.dll` |
+| `libbrotlidec.dll` |
+| `libbrotlienc.dll` |
+| `libbz2-1.dll` |
+| `libcharset-1.dll` |
+| `libexpat-1.dll` |
+| `libfontconfig-1.dll` |
+| `libfreetype-6.dll` |
+| `libfribidi-0.dll` |
+| `libgio-2.0-0.dll` |
+| `libgirepository-2.0-0.dll` |
+| `libglib-2.0-0.dll` |
+| `libgmodule-2.0-0.dll` |
+| `libgobject-2.0-0.dll` |
+| `libgraphite2.dll` |
+| `libgthread-2.0-0.dll` |
+| `libharfbuzz-0.dll` |
+| `libharfbuzz-gobject-0.dll` |
+| `libharfbuzz-raster-0.dll` |
+| `libharfbuzz-subset-0.dll` |
+| `libharfbuzz-vector-0.dll` |
+| `libiconv-2.dll` |
+| `libintl-8.dll` |
+| `libpcre2-16-0.dll` |
+| `libpcre2-32-0.dll` |
+| `libpcre2-8-0.dll` |
+| `libpcre2-posix-3.dll` |
+| `libpng16-16.dll` |
+| `libunibreak-7.dll` |
 | `pluginplayer.exe` |
+| `zlib1.dll` |
 
 ### `dist/` 载荷
 
-发布载荷共 **22 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
+发布载荷共 **54 个文件**（口径同 `build.py --release`，即已剔除运行期产物）。数量与体积的具体口径写在 README 的「发布构建」一节，由 `tools/verify.py` 的 `release-payload` 门禁核对 —— 这里不重复那些数字，避免同一事实两处维护。
 
 ## 开发期使用、但不随发布物分发
 

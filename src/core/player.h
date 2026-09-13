@@ -223,6 +223,11 @@ public:
     void  loadExternalSubtitles(const std::vector<SubCue>& cues);
     static std::vector<SubCue> parseSrt(const std::string& path);
 
+    /* P1-e：把字幕 ASS 事件（header / 每帧 dialogue）转发出去，避免给 ABI 加方法。
+     * App 构造时塞入 publish 闭包（host.bus().publish）；为空则不发（旧行为）。 */
+    void  setSubtitlePublisher(std::function<void(const char*, const char*)> fn)
+                { subPublish_ = std::move(fn); }
+
     /* --- 多轨（P1-d，能力通道；选择由内核 reopen 执行，渲染/UI 由插件做） --- */
     struct TrackInfo {
         int         index = -1;
@@ -287,6 +292,9 @@ private:
     int              prefVideo_ = -1, prefAudio_ = -1, prefSub_ = -1;
     std::vector<SubCue> subCues_;        /* 当前活跃字幕（内嵌累计 + 外部覆盖） */
     mutable std::mutex  subMu_;
+    /* P1-e：字幕 ASS 事件转发闭包（App 注入）。持有后由内核在解出字幕时调用，
+     * 把 header / 每帧 dialogue 以事件总线暴露给 subtitles 插件（libass 渲染）。 */
+    std::function<void(const char*, const char*)> subPublish_;
     bool             subExternal_ = false;
     AVCodecContext*  vCtx_ = nullptr;
     AVCodecContext*  aCtx_ = nullptr;

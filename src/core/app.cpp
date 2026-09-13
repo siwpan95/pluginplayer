@@ -127,6 +127,11 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     if (!host_.init(appDir)) return false;
     host_.setApp(this);
     host_.setPlayer(&player_);
+    /* P1-e：把字幕 ASS 事件（header / 每帧 dialogue）经事件总线转发出去，
+     * 供 subtitles 插件用 libass 渲染（不进 ABI，单一字幕源在内核）。 */
+    player_.setSubtitlePublisher([this](const char* t, const char* j) {
+        host_.bus().publish(host_.handle(), t, j);
+    });
     /* P1-c：订阅"加载外部字幕"请求（命令来自 subtitles 插件，内核执行加载，
      * 单一字幕源、渲染交给插件，避免给 ABI 加方法）。owner=0 表示宿主内置。 */
     host_.bus().subscribe("subtitle.load.req", &onSubtitleLoadReq, this, 0);

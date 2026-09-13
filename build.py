@@ -91,6 +91,7 @@ INCLUDES = [
     "-Isrc/sdk", "-Isrc/core",
     "-Ivendor/sdl3/include", "-Ivendor/ffmpeg/include",
     "-Ivendor/stb",            # stb_truetype.h（P1-a 真字体）
+    "-Ivendor/libass/include", # P1-e libass 字幕渲染（仅 subtitles 插件用到）
 ]
 
 # 只静态链接运行时库（libgcc / libstdc++ / libwinpthread），
@@ -108,6 +109,15 @@ LDFLAGS_CORE = [
 ] + STATIC_RUNTIME
 
 LDFLAGS_PLUGIN = ["-shared"] + STATIC_RUNTIME
+
+# 每个插件的额外链接参数（按插件名）。subtitles 需要链接 libass 导入库
+# （libass.dll.a），运行时由 Windows 加载器从 dist/ 解析 libass-9.dll 及其闭包。
+PLUGIN_EXTRA_LDFLAGS = {
+    "subtitles": ["-Lvendor/libass/lib", "-lass"],
+}
+
+# 需要 vendor/libass 才能编译的插件（缺依赖时给出明确报错而不是一堆找不到 include 的噪声）
+PLUGIN_NEEDS_LIBASS = {"subtitles"}
 
 
 def run(cmd, cwd=ROOT, quiet=False, env=None):
@@ -172,9 +182,13 @@ def build_plugin(name, flags=None):
     if not os.path.isfile(src):
         print(f"[SKIP] 插件源码不存在: {src}")
         return False
+    if name in PLUGIN_NEEDS_LIBASS and not os.path.isdir(os.path.join(VENDOR, "libass", "include")):
+        print(f"[ERR] 插件 {name} 需要 vendor/libass/（先跑 tools/fetch_libass.py）")
+        return False
     os.makedirs(BUILD, exist_ok=True)
     out = os.path.join(BUILD, name + ".dll")
-    cmd = ([GXX] + (flags or CXXFLAGS) + INCLUDES + [src, "-o", out] + LDFLAGS_PLUGIN)
+    extra = PLUGIN_EXTRA_LDFLAGS.get(name, [])
+    cmd = ([GXX] + (flags or CXXFLAGS) + INCLUDES + [src, "-o", out] + LDFLAGS_PLUGIN + extra)
     rc, log = run(cmd)
     if rc != 0:
         print(f"[FAIL] 插件 {name} 编译失败：\n{log}")
@@ -305,6 +319,18 @@ def package():
         if cp(os.path.join(BUILD, pl + ".dll"), os.path.join(DIST, "plugins")):
             p += 1
     print(f"[OK] 复制运行时 DLL {n} 个，插件 {p} 个")
+
+    # libass 字幕栈（P1-e）：仅 subtitles 插件依赖，但其 DLL 闭包必须随 dist 发，
+    # 否则 dist/ 里启动后会以 0xC0000135 找不到 libass-9.dll（或它的传递依赖）。
+    # 闭包由 tools/fetch_libass.py 固定点抓取，bin/ 下即完整可加载集。
+    libass_bin = os.path.join(VENDOR, "libass", "bin")
+    if os.path.isdir(libass_bin):
+        m = 0
+        for f in sorted(os.listdir(libass_bin)):
+            if f.lower().endswith(".dll") and cp(os.path.join(libass_bin, f), DIST):
+                m += 1
+        if m:
+            print(f"[OK] 复制 libass 字幕栈 DLL {m} 个")
 
     # 随包字体（P1-a 真字体）。assets/ 整体复制 —— 目录里现在是
     # assets/fonts/*.ttf；以后放别的静态资源也不用改这里。

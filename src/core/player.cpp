@@ -456,6 +456,72 @@ static std::string stripAssTags(const std::string& s) {
     return cleaned.substr(a, b - a + 1);
 }
 
+/* ---------------- P1-e：字幕 ASS 事件（供 libass 渲染，不进 ABI） ----------------
+ * 内核只解码、不渲染：把字幕包转为 ASS 事件（subtitle.ass_header + subtitle.ass）
+ * 经事件总线暴露给 subtitles 插件，由插件用 libass 真正画图。与既有 subtitle.line
+ * （纯文本）并存；旧插件只用 subtitle.line 不受影响。 */
+
+/* 秒数 -> ASS 时间戳 H:MM:SS.cc（厘秒）。 */
+static std::string buildAssTime(double sec) {
+    if (sec < 0) sec = 0;
+    long long ms = (long long)(sec * 1000.0 + 0.5);
+    long long h = ms / 3600000; ms %= 3600000;
+    long long m = ms / 60000;    ms %= 60000;
+    long long s = ms / 1000;     ms %= 1000;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%lld:%02lld:%02lld.%02lld", h, m, s, ms / 10);
+    return buf;
+}
+
+/* 构建一条媒体只发一次的 ASS 头：含 PlayRes 与默认样式。
+ * 默认样式字体名 "PluginPlayerSub" 必须与插件注册进 libass 的家族名一致
+ * （见 player_plugin.h 的 PP_SUBTITLE_FONT_FAMILY —— 内核这里硬编码镜像，避免引插件 SDK 头）。
+ * 字号按 PlayResY 等比（约 1/18），保证不同分辨率下观感一致。 */
+static std::string buildAssHeader(int w, int h) {
+    if (w <= 0) w = 1280;
+    if (h <= 0) h = 720;
+    int fs = h / 18; if (fs < 12) fs = 12;
+    char buf[1152];
+    std::snprintf(buf, sizeof(buf),
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "PlayResX: %d\n"
+        "PlayResY: %d\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,PluginPlayerSub,%d,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,1.5,1.2,2,20,20,20,1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+        w, h, fs);
+    return buf;
+}
+
+/* 从 FFmpeg 解出的字幕包（rct->ass 是完整 Dialogue 行，或 rct->text 纯文本）抽取
+ * "文本内容"字段（Dialogue 第 9 个逗号之后），保留其中的 ASS 覆盖标签（\an \b \c…）。
+ * 非 Dialogue 的纯文本整体当内容，并把 \n 换成 \N（ASS 换行）。 */
+static std::string extractAssText(const std::string& raw) {
+    if (raw.rfind("Dialogue:", 0) != 0) {
+        std::string out; out.reserve(raw.size());
+        for (char c : raw) { if (c == '\n') out += "\\N"; else if (c != '\r') out.push_back(c); }
+        return out;
+    }
+    int commas = 0;
+    size_t p = 0;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == ',') { if (++commas == 9) { p = i + 1; break; } }
+    }
+    if (commas < 9) return raw;          /* 字段不足，整体当文本兜底 */
+    std::string content = raw.substr(p);
+    while (!content.empty() && (content.back() == '\r' || content.back() == '\n')) content.pop_back();
+    size_t a = content.find_first_not_of(" \t");
+    if (a == std::string::npos) return "";
+    return content.substr(a);
+}
+
 bool Player::openSubtitleCodec(int idx) {
     AVStream* st = fmt_->streams[idx];
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
@@ -486,6 +552,7 @@ void Player::subtitleDecodeLoop() {
     AVSubtitle sub{};
     double nextPts = 0.0;
     int lastQSerial = -1;
+    bool needHeader = true;          /* P1-e：下一跳有效字幕前先发一次 ASS 头（seek 后重置） */
     while (!abort_) {
         int serial = 0;
         int r = sq_.get(pkt, 1, &serial);
@@ -496,6 +563,7 @@ void Player::subtitleDecodeLoop() {
         if (serial != lastQSerial) {
             avcodec_flush_buffers(sCtx_);
             lastQSerial = serial;
+            needHeader = true;        /* P1-e：换轴/secre 后重发 ASS 头，插件据此重置 libass track */
         }
         const bool isDrain = (pkt->data == nullptr);
 
@@ -525,6 +593,26 @@ void Player::subtitleDecodeLoop() {
                 if (serial == sq_.serial()) {
                     std::lock_guard<std::mutex> lk(subMu_);
                     if (!subExternal_) subCues_.push_back({s, e, text});
+                    /* P1-e：把带样式的 ASS（header + 每帧 dialogue）转发出去供 libass 渲染。
+                     * 与上方 subCues_（纯文本）并存；旧插件只用 subtitle.line 不受影响。 */
+                    if (subPublish_) {
+                        std::string content = extractAssText(raw);
+                        if (!content.empty()) {
+                            if (needHeader) {
+                                int vW = videoWidth()  > 0 ? videoWidth()  : 1280;
+                                int vH = videoHeight() > 0 ? videoHeight() : 720;
+                                std::string hp = "{\"header\":\""
+                                              + jsonEscape(buildAssHeader(vW, vH)) + "\"}";
+                                subPublish_("subtitle.ass_header", hp.c_str());
+                                needHeader = false;
+                            }
+                            std::string line = std::string("Dialogue: 0,")
+                                             + buildAssTime(s) + "," + buildAssTime(e)
+                                             + ",Default,,0,0,0,," + content;
+                            std::string lp = "{\"line\":\"" + jsonEscape(line) + "\"}";
+                            subPublish_("subtitle.ass", lp.c_str());
+                        }
+                    }
                 }
             }
             avsubtitle_free(&sub);
@@ -552,9 +640,35 @@ void Player::currentSubtitle(double pts, std::string& out) const {
 }
 
 void Player::loadExternalSubtitles(const std::vector<SubCue>& cues) {
-    std::lock_guard<std::mutex> lk(subMu_);
-    subCues_ = cues;
-    subExternal_ = true;
+    {
+        std::lock_guard<std::mutex> lk(subMu_);
+        subCues_ = cues;
+        subExternal_ = !cues.empty();
+    }
+    /* P1-e：外部 .srt 也走 libass 渲染通道。header 与内嵌走同一套样式，
+     * 字体名必须与插件注册进 libass 的家族名一致（见 player_plugin.h 的
+     * PP_SUBTITLE_FONT_FAMILY，这里硬编码镜像，避免内核引入插件 SDK 头）。 */
+        if (subPublish_ && !cues.empty()) {
+            int vW = videoWidth()  > 0 ? videoWidth()  : 1280;
+            int vH = videoHeight() > 0 ? videoHeight() : 720;
+            std::string hdr = "{\"header\":\"" + jsonEscape(buildAssHeader(vW, vH)) + "\"}";
+            /* 主题名必须与 player_plugin.h 的 PP_TOPIC_SUBTITLE_ASS_HEADER / _ASS 一致
+             * （内核不引插件 SDK 头，这里硬编码镜像）。 */
+            subPublish_("subtitle.ass_header", hdr.c_str());
+            for (const auto& c : cues) {
+                std::string out;
+                out.reserve(c.text.size());
+                for (char ch : c.text) {        /* 外部 .srt 是纯文本，\n -> \N（ASS 换行） */
+                    if (ch == '\n') out += "\\N";
+                    else if (ch != '\r') out.push_back(ch);
+                }
+                if (out.empty()) continue;
+                std::string line = std::string("Dialogue: 0,") + buildAssTime(c.start) + ","
+                                 + buildAssTime(c.end) + ",Default,,0,0,0,," + out;
+                std::string p2 = "{\"line\":\"" + jsonEscape(line) + "\"}";
+                subPublish_("subtitle.ass", p2.c_str());
+            }
+        }
 }
 
 static bool parseSrtTime(const std::string& t, double& out) {
