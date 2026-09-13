@@ -38,7 +38,7 @@ static const PP_HostApi* g_api  = nullptr;
 
 /* ---------------- 配置（radio.base/radio.poll/radio.follow，持久化到 ini） ---------------- */
 static std::mutex        g_cfgMu;
-static std::string       g_base = "http://127.0.0.1:8760"; /* 无尾斜杠；只支持 http://host[:port] */
+static std::string       g_base = "http://127.0.0.1:8000"; /* 与 private-radio-stations 默认 HTTP 端口一致；无尾斜杠；只支持 http://host[:port] */
 static std::atomic<int>  g_pollSec{3};
 static std::atomic<int>  g_follow{0};
 
