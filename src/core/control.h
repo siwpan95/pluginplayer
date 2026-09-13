@@ -21,7 +21,8 @@
  *     认证通过前，任何其它方法一律返回错误；认证失败立即断开连接。
  *   · 单条报文硬上限 kMaxLineBytes，超限断连（防内存耗尽）
  *   · 并发连接上限 kMaxClients（防线程耗尽）
- *   · 空闲超时 kIdleTimeoutMs（超时不再断连，仅用于让 recv 可被周期性唤醒以便退出）
+ *   · 空闲超时 kIdleTimeoutMs（**不断连**，仅用于让阻塞的 recv 周期性醒来以便退出；
+ *     取小值见下 —— 它同时决定「客户端保持连接时 app.quit 的退出延迟」）
  *   · 事件只推给**已认证**的连接（未认证连接收不到任何内核事件）
  * ==========================================================================
  */
@@ -44,7 +45,13 @@ public:
     /* ---- 安全参数（硬上限） ---- */
     static constexpr size_t kMaxLineBytes   = 4u * 1024u * 1024u;  /* 单条报文 4 MB */
     static constexpr int    kMaxClients     = 8;                    /* 并发连接上限 */
-    static constexpr int    kIdleTimeoutMs  = 30000;                /* recv 空闲超时 */
+    /* recv 空闲超时。**不是断连超时**：客户端空闲不会被断开，这个值只是让阻塞在
+     * recv 的线程周期性醒来查一次 running_。必须取小 —— 实测 Windows 下跨线程
+     * ::shutdown(sk, SD_BOTH) 并不唤醒 pending recv（V1 复现：app.quit 后进程
+     * 卡满整整一个超时周期才退出），于是「客户端保持连接时 app.quit 的退出延迟」
+     * 就等于这个值。取 1000ms：退出延迟 ≤1s，且 8 个并发连接每秒共 8 次唤醒，
+     * 开销可忽略。 */
+    static constexpr int    kIdleTimeoutMs  = 1000;                 /* recv 空闲唤醒周期 */
     static constexpr int    kSendTimeoutMs  = 10000;                /* send 超时 */
     static constexpr int    kRequestTimeoutSec = 10;                /* 等主线程执行的上限 */
 

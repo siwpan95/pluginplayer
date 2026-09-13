@@ -172,19 +172,18 @@ void RpcServer::stop() {
 
     /* 先摘出列表，再逐个体面关闭并 join。
      * 客户端对象由 shared_ptr 持有，join 之前不会被析构，因此不存在
-     * 「主线程 delete 掉、工作线程还在用」的 use-after-free。 */
+     * 「主线程 delete 掉、工作线程还在用」的 use-after-free。
+     *
+     * 注意这里**故意不再对客户端 socket 调 ::shutdown**：实测 Windows 下跨线程
+     * shutdown(sk, SD_BOTH) 既不唤醒 pending recv，还会**阻塞调用方**直到 recv
+     * 的下一个 SO_RCVTIMEO tick 才返回（quit 延迟实测从 30s 修到 1s 后仍残留
+     * ~4s，全在这个调用上）。唤醒机制就是 kIdleTimeoutMs=1000 的周期 tick：
+     * recv 醒来看到 running_==false 自行 break，≤1s 内退出；阻塞在 send 的线程
+     * 受 SO_SNDTIMEO=10s 兜底。 */
     std::vector<std::shared_ptr<Client>> cs;
     {
         std::lock_guard<std::mutex> lk(mu_);
         cs.swap(clients_);
-    }
-    for (auto& c : cs) {
-        std::lock_guard<std::mutex> lk(c->mu);
-        uintptr_t sk = c->sock.load();
-        if (sk != (uintptr_t)-1) {
-            /* shutdown 会立刻唤醒阻塞在 recv 的线程，让 join 快速返回 */
-            ::shutdown((SOCKET)sk, SD_BOTH);
-        }
     }
     for (auto& c : cs) {
         if (c->th.joinable()) c->th.join();

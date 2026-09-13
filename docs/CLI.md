@@ -340,7 +340,7 @@ CLI 按输出目标分流（`setup_stdio()`）：
 - **`volume +N/-N` 是两次往返**（先读 stats 再写），不是原子的。并发改音量时可能丢一次更新。
 - **`mute` 没有纯查询**。协议里不给 `value` 就是 toggle，想"看一眼是否静音"只能
   `pluginplayer rpc player.mute` —— 但那会切换状态。所以 `status` 里不显示静音。
-- **`events` 需要自己带时长**（`--seconds`，默认 10）。控制通道的 30 秒空闲超时只用来
+- **`events` 需要自己带时长**（`--seconds`，默认 10）。控制通道的 1 秒空闲超时只用来
   周期性唤醒 `recv`，服务端不会主动断开，所以不加时限就会一直等下去。
 - **`cmd` 的全局选项在命令名之后会被当作参数**。`pluginplayer cmd stats --json` 里的
   `--json` 是**插件命令的参数**；要 CLI 的 JSON 输出请写 `pluginplayer --json cmd stats`，

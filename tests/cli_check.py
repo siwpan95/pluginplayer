@@ -28,6 +28,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -417,6 +418,75 @@ def t_forwarded_args_after_dashdash():
     return True, "-- 之前拦下、之后原样透传"
 
 
+def t_quit_open_connection_fast():
+    """app.quit 后**客户端保持连接**时，进程必须在数秒内退出（rc=0）。
+
+    回归背景：旧实现 kIdleTimeoutMs=30000，而 Windows 下跨线程 ::shutdown() 并不
+    唤醒 pending recv —— 实测 quit 后进程卡满整整一个 recv 超时周期（30.5s）才退。
+    修复后 kIdleTimeoutMs=1000，退出延迟应 ≤2s。这里自起一个隐藏实例，发完
+    app.quit 故意不关 socket（正是旧实现会卡住的场景），掐表断言。"""
+    if not os.path.isfile(EXE):
+        return None, "dist/pluginplayer.exe 不存在（先构建）"
+    port = free_port()
+    token = "ABCDEF0123456789"
+    env = dict(os.environ)
+    env["SDL_VIDEODRIVER"] = "dummy"          # 无头跑，不弹窗
+    env["SDL_AUDIODRIVER"] = "dummy"
+    logf = os.path.join(os.environ.get("TEMP", "."),
+                        "pp_quit_regression_%d.log" % port)
+    p = subprocess.Popen(
+        [EXE, "--hidden", "--log-level", "2",
+         "--rpc-port", str(port), "--rpc-token", token],
+        cwd=DIST, env=env,
+        stdout=open(logf, "wb"), stderr=subprocess.STDOUT)
+    s = None
+    try:
+        for _ in range(40):                    # 等控制通道监听（最多 10s）
+            if p.poll() is not None:
+                tail = open(logf, encoding="utf-8", errors="replace").read()[-400:]
+                raise AssertionError("播放器提前退出 rc=%s\n%s" % (p.returncode, tail))
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+                break
+            except OSError:
+                time.sleep(0.25)
+        assert s, "控制通道迟迟没有监听 127.0.0.1:%d" % port
+        s.sendall(('{"id":1,"method":"auth","params":{"token":"%s"}}\n' % token)
+                  .encode("utf-8"))
+        s.settimeout(5.0)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        auth = json.loads(buf.decode("utf-8", "replace").splitlines()[0])
+        assert auth.get("ok"), "认证失败: %s" % auth
+
+        t0 = time.time()
+        s.sendall(b'{"id":2,"method":"app.quit","params":{}}\n')
+        for _ in range(60):                    # 最多等 6s，且**不关 socket**
+            rc = p.poll()
+            if rc is not None:
+                elapsed = time.time() - t0
+                assert rc == 0, "退出码应为 0，实际 %d" % rc
+                assert elapsed < 5.0, "quit 后 %.1fs 才退出（回归：应 ≤2s）" % elapsed
+                return True, "保持连接时 quit 后 %.1fs 退出（rc=0）" % elapsed
+            time.sleep(0.1)
+        raise AssertionError("quit 后 6 秒仍未退出（回归：卡满一个 idle 周期）")
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+        if p.poll() is None:
+            p.kill()
+        try:
+            os.remove(logf)
+        except OSError:
+            pass
+
+
 def main():
     print("=" * 78)
     print("PluginPlayer CLI 回归测试 (tools/pp_cli.py)")
@@ -456,6 +526,7 @@ def main():
     case("控制通道: commands", t_commands_live)
     case("控制通道: cmd 调用与失败码", t_invoke_live)
     case("控制通道: events", t_events_live)
+    case("控制通道: quit 保持连接也快速退出", t_quit_open_connection_fast)
 
     npass = sum(1 for _, s, _ in RESULTS if s == "PASS")
     nfail = sum(1 for _, s, _ in RESULTS if s == "FAIL")
