@@ -63,6 +63,15 @@ struct VideoFrame {
     int      serial = 0;
 };
 
+/* 字幕 cue（P1-c 能力通道的载体）：一段应显示的文本及其起止时间（秒）。
+ * 内核解出/加载后只保留纯文本（轻路线剥离 ASS 样式标签，只留文本与换行），
+ * 渲染交给 subtitles 插件——内核不做渲染（架构红线）。 */
+struct SubCue {
+    double    start = 0.0;   /* 应开始显示的 pts（秒） */
+    double    end   = 0.0;   /* 应结束显示的 pts（秒） */
+    std::string text;        /* 这一行的字幕文本（可能含 '\n' 表示多行） */
+};
+
 /* ------------------------- 数据包队列 ------------------------- */
 class PacketQueue {
 public:
@@ -200,12 +209,23 @@ public:
     /** 归一化到 [-1,1] 的最近音频快照（供频谱插件使用）。 */
     int   snapshotAudio(float* dst, int maxSamples) const;
 
+    /* --- 字幕（P1-c，能力通道；渲染由插件做，内核不渲染） ---
+     * 走事件总线暴露当前字幕行（subtitle.line），不进 ABI。 */
+    bool  hasSubtitles() const;
+    /** 取 pts 时刻应显示的字幕文本（无则返回空串）。主线程调用。 */
+    void  currentSubtitle(double pts, std::string& out) const;
+    /** 加载外部 .srt（覆盖内嵌字幕轨）。 */
+    void  loadExternalSubtitles(const std::vector<SubCue>& cues);
+    static std::vector<SubCue> parseSrt(const std::string& path);
+
 private:
     void demuxLoop();
     void videoDecodeLoop();
     void audioDecodeLoop();
     bool openVideoCodec(int idx);
     bool openAudioCodec(int idx);
+    bool openSubtitleCodec(int idx);
+    void subtitleDecodeLoop();
     void flushAfterSeek(double target);
     static int interruptCb(void* opaque);
 
@@ -228,6 +248,17 @@ private:
     AVFormatContext* fmt_ = nullptr;
     int              vStream_ = -1;
     int              aStream_ = -1;
+    /* --- 字幕（P1-c 能力通道）---
+     * 内嵌字幕流交给 FFmpeg 解码（AV_CODEC_ID_SUBRIP / ASS），解出纯文本后存进 subCues_；
+     * 外部 .srt 经 subtitle.load 命令 → core 加载后也并入 subCues_。渲染由 subtitles 插件做，
+     * 内核只通过 subtitle.line 事件暴露当前行（不进 ABI）。 */
+    int              sStream_ = -1;
+    AVCodecContext*  sCtx_ = nullptr;
+    PacketQueue      sq_;
+    std::thread      sdecTh_;
+    std::vector<SubCue> subCues_;        /* 当前活跃字幕（内嵌累计 + 外部覆盖） */
+    mutable std::mutex  subMu_;
+    bool             subExternal_ = false;
     AVCodecContext*  vCtx_ = nullptr;
     AVCodecContext*  aCtx_ = nullptr;
     SwsContext*      sws_ = nullptr;

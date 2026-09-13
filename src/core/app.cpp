@@ -28,6 +28,21 @@ static const double kMaxClearRatioInVideo = 0.80;
 
 /* ======================= 初始化 ======================= */
 
+/* P1-c：subtitles 插件的 subtitle.load 命令把请求以事件形式发过来（避免给 ABI 加方法），
+ * 这里订阅并真正加载外部字幕。命令在主线程（RPC/自检）同步派发，所以回调也同步执行。 */
+static int onSubtitleLoadReq(PP_EventCtx* ctx) {
+    App* a = (App*)ctx->user;
+    if (!a || !ctx->json) return 0;
+    std::string path = jsonGetString(ctx->json, "path", "");
+    if (path.empty()) { PP_WARN("subtitle.load: 缺少 path 参数"); return 0; }
+    if (!fileExists(path)) { PP_WARN("subtitle.load: 文件不存在: %s", path.c_str()); return 0; }
+    auto cues = Player::parseSrt(path);
+    if (cues.empty()) { PP_WARN("subtitle.load: 未解析出任何字幕行: %s", path.c_str()); return 0; }
+    a->player().loadExternalSubtitles(cues);
+    PP_INFO("subtitle.load: 已加载 %d 条外部字幕: %s", (int)cues.size(), path.c_str());
+    return 0;
+}
+
 bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     /* 防御性钳位：即使调用方漏了校验，也不让越界尺寸流到 SDL。
      * 越界尺寸会在 SDL_RenderReadPixels / 纹理分配处触发 int32 溢出崩溃。 */
@@ -81,6 +96,9 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     if (!host_.init(appDir)) return false;
     host_.setApp(this);
     host_.setPlayer(&player_);
+    /* P1-c：订阅"加载外部字幕"请求（命令来自 subtitles 插件，内核执行加载，
+     * 单一字幕源、渲染交给插件，避免给 ABI 加方法）。owner=0 表示宿主内置。 */
+    host_.bus().subscribe("subtitle.load.req", &onSubtitleLoadReq, this, 0);
     /* 所有宿主事件同时转发给控制通道（进程外插件） */
     host_.setEventSink([this](const std::string& t, const std::string& j) {
         rpc_.broadcastEvent(t, j);
@@ -237,6 +255,7 @@ bool App::openMedia(const std::string& path) {
     }
     completedFired_ = false;
     lastUploadedIndex_ = -1;
+    lastSubLine_.clear();      /* 强制重播新媒体的首条字幕状态 */
     closeAudio();
     if (!player_.open(path)) {
         lastError_ = format("无法打开媒体: %s", path.c_str());
@@ -729,6 +748,22 @@ void App::renderFrame() {
     videoRectW_ = vw;
     videoRectH_ = vh;
     videoRectValid_ = (tex_ != nullptr);
+
+    /* 字幕能力通道（P1-c）：每帧算出当前应显示的字幕行，仅在文本变化时广播。
+     * 渲染由 subtitles 插件在 osd.draw 里做 —— 内核不渲染（架构红线）。
+     * 走普通字符串主题 "subtitle.line"，不进 ABI。 */
+    if (player_.isOpen() && player_.hasSubtitles()) {
+        std::string line;
+        player_.currentSubtitle(player_.masterClock(), line);
+        if (line != lastSubLine_) {
+            lastSubLine_ = line;
+            if (line.empty())
+                publishEvent("subtitle.line", "{\"text\":\"\"}");
+            else
+                publishEvent("subtitle.line",
+                             format("{\"text\":\"%s\"}", jsonEscape(line).c_str()).c_str());
+        }
+    }
 
     /* OSD 阶段：把绘制权交给插件（O 键可整体隐藏，连 osd.draw 都不广播） */
     if (!osdHidden_) {
@@ -1293,6 +1328,66 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
                             red1, rc1, SIDE * SIDE / 2, red2, rc2, 1, overlayCount());
         }
         addStep("overlay_owner_revoke", ok, detail);
+    }
+
+    /* --- P1-c 字幕渲染（像素级断言） ---
+     * 验证"内核暴露 subtitle.line 事件 → subtitles 插件用 P1-a 真字体把字画到屏幕"
+     * 这条 P1-c 通道真的把字渲染出来（不是只把事件发出去）。
+     * 做法：临时写一段覆盖整个时长的外部 .srt，用 subtitle.load 命令加载；
+     * 渲染一帧后到【底部黑边带】找近白色字幕像素。
+     * 命令缺失 / .srt 写不出 / 抓屏失败 → SKIP（跳过 ≠ 通过），不冒充验证。 */
+    {
+        std::string subPath = pathJoin(outDir, "selftest_sub.srt");
+        std::string srt = "1\n00:00:00,000 --> 23:59:59,999\nSUBTITLE 字幕测试 你好世界\n";
+        {
+            FILE* f = fopen(subPath.c_str(), "wb");
+            if (f) { fwrite(srt.data(), 1, srt.size(), f); fclose(f); }
+        }
+        const char* slArgv[1] = { subPath.c_str() };
+        bool subLoaded = fileExists(subPath) && host_.commands().has("subtitle.load") &&
+                          host_.invokeCommand("subtitle.load", 1, slArgv) == 0;
+        if (!subLoaded) {
+            skipStep("subtitle_render", "无法加载外部字幕（命令缺失或 .srt 写出失败），跳过字幕渲染校验");
+        } else {
+            /* 推进一帧让主时钟走动，并让 subtitle.line 事件发出当前行（仅文本变化时广播） */
+            rpc_.pumpMainThread();
+            stepAudioPreroll();
+            player_.pumpFrame();
+            pumpAndUpload(true);
+            renderFrame();
+            SDL_Surface* s = SDL_RenderReadPixels(ren_, nullptr);
+            SDL_RenderPresent(ren_);
+            if (!s) {
+                skipStep("subtitle_render", "字幕渲染后抓屏失败，跳过校验");
+            } else {
+                /* 存盘以便人工/取证核对（这帧到底有没有字幕） */
+                std::string bmpPath = pathJoin(outDir, "subtitle_render.bmp");
+                SDL_SaveBMP(s, bmpPath.c_str());
+                SDL_Surface* rgba = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32);
+                int whiteAll = 0, whiteBand = 0, yMin = rgba ? rgba->h : 0, yMax = 0;
+                const int y0 = (int)(winH_ * 0.74);
+                if (rgba) {
+                    for (int y = 0; y < rgba->h; y++)
+                        for (int x = 0; x < rgba->w; x++) {
+                            const uint8_t* p = (const uint8_t*)rgba->pixels +
+                                               y * rgba->pitch + x * 4;
+                            if (p[0] > 180 && p[1] > 180 && p[2] > 180) {
+                                whiteAll++;
+                                if (y > yMax) yMax = y;
+                                if (y < yMin) yMin = y;
+                                if (y >= y0) whiteBand++;
+                            }
+                        }
+                    SDL_DestroySurface(rgba);
+                }
+                SDL_DestroySurface(s);
+                bool ok = whiteBand >= 150;
+                addStep("subtitle_render", ok,
+                        format("近白像素 全帧 %d / 底部带 %d（阈值 150）；白区 y∈[%d,%d]；已存 %s%s",
+                               whiteAll, whiteBand, yMin, yMax, bmpPath.c_str(),
+                               ok ? "" : "；底部带为 0 说明 subtitle.line → 插件渲染通道未把字画到屏幕"));
+            }
+        }
     }
 
     /* --- 卸载/重载往返测试（验证注册撤销干净） --- */

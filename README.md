@@ -43,14 +43,14 @@
 :: 1) 准备依赖（首次；本机已有压缩包时会直接复用）
 F:\Python314\python.exe tools\fetch_deps.py
 
-:: 2) 构建（内核 + 5 个原生插件 + 打包 dist/）
+:: 2) 构建（内核 + 6 个原生插件 + 打包 dist/）
 F:\Python314\python.exe build.py
 
 :: 2b) 冒烟测试（编译并运行 tests/ 下两个冒烟程序，几秒钟）
 F:\Python314\python.exe build.py --smoke
 
 :: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
-::     实测产物 19 个文件 / 129 MB（不带 --release 时 dist/ 会累积日志与自检证据）
+::     实测产物 20 个文件 / 130 MB（不带 --release 时 dist/ 会累积日志与自检证据）
 F:\Python314\python.exe build.py --release
 
 :: 3) 播放（把视频拖到 run.bat 上，或：）
@@ -347,7 +347,7 @@ pluginplayer/
 │  │  ├─ osd.cpp/h                    叠加层绘制（文字/面板/矩形/频谱柱）
 │  │  ├─ control.cpp/h                ★ 控制通道（JSON-RPC over TCP）
 │  │  └─ config.cpp/h  util.cpp/h      配置持久化 / 日志 / PNG 写出
-│  └─ plugins/                         5 个原生插件（各自独立 .cpp → .dll）
+│  └─ plugins/                         6 个原生插件（各自独立 .cpp → .dll）
 ├─ host-js/                            进程外 JS 插件宿主（Cordis）
 │  ├─ src/player-service.mjs           ctx.player 服务（控制通道客户端）
 │  ├─ src/index.mjs                    宿主入口（装载/卸载插件）
@@ -434,9 +434,9 @@ pluginplayer/
 
 ```
 [PASS] sdl_init              — SDL3 video driver=windows
-[PASS] plugins_loaded        — 加载 5 个插件，失败 0 个
+[PASS] plugins_loaded        — 加载 6 个插件，失败 0 个
 [PASS] services_registered   — 服务 2 个
-[PASS] commands_registered   — 命令 15 个
+[PASS] commands_registered   — 命令 16 个
 [PASS] open_media            — mp4 1280x720 30.00 fps dur=8.00 s codec=h264/aac
 [PASS] decode_and_display    — 显示 90 帧（目标 90，可接受下限 89；媒体约 240 帧可用），被插件丢弃 0 帧
 [PASS] seek                  — 目标 4.80 s，seek 后位置 5.05 s，新显示 5 帧 (上一帧 index=121)
@@ -580,14 +580,14 @@ pluginplayer/
                           插件目录共 6 个 DLL：成功 5，失败 1    exit=4
 改坏已登记插件 1 字节  →  [ERROR] [hotkey_ext.dll] SHA-256 与清单不符
                           （期望 79295e91adde359e…，实测 da99d1fab0453f5d…）  exit=4
-重新生成清单后         →  插件目录共 5 个 DLL：成功 5，失败 0    exit=0
+重新生成清单后         →  插件目录共 6 个 DLL：成功 5，失败 0    exit=0
 ```
 
 ### 9. 发布构建 `build.py --release`
 
 ```
 [OK] 已删除 build/ 与 dist/          ← 先干净重建（否则会继承上一轮的残留）
-[OK] 已生成 plugins/manifest.sha256（5 个插件）
+[OK] 已生成 plugins/manifest.sha256（6 个插件）
 [OK] 已生成 run.bat、selftest.bat、start-dsh.bat 与 ci.bat（纯 ASCII，CRLF）
 [release] 可发布文件 19 个，合计 128.6 MB
 ```
@@ -618,7 +618,7 @@ pluginplayer/
 - **装卸回归**：`install-cli` → `uninstall-cli` 后目录必须为空；且往目标目录放一个
   **别人手工写的同名 `pluginplayer.cmd`**，卸载时必须跳过、不能误删。
 - **真跑控制通道**：`status`（info/stats/volume 齐备）、`seek`（相对 + 绝对）、
-  `commands`（断言恰好 15 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`
+  `commands`（断言恰好 16 个）、`cmd`（真实命令退 0 / 不存在退 5）、`events`
   （断言真收到 `app.tick`）。
 
 需要 `dist/` 或运行中播放器的用例在前提缺失时记 `SKIP` 且**不计入通过数**
@@ -643,9 +643,9 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 ==== 机械门禁: 18/18 通过，跳过 0 项，失败 0 项 ====
 
 [PASS] bat-ascii-crlf       6 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR（含 start-dsh.bat）
-[PASS] plugin-manifest      5 个 DLL 哈希与清单逐一相符
-[PASS] plugin-command-count 注册 15 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
-[PASS] native-plugin-set    5 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
+[PASS] plugin-manifest      6 个 DLL 哈希与清单逐一相符
+[PASS] plugin-command-count 注册 16 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
+[PASS] native-plugin-set    6 个：audio_viz, hotkey_ext, osd_stats, snapshot, video_effects
 [PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs）
 [PASS] release-payload      19 个文件 / 128.6 MB，与 README 的 19 / 129 MB 一致
 [PASS] portable-modules     20 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
@@ -653,7 +653,7 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] arg-bounds-align     13 项边界与 C++ 源码一致
 [PASS] rpc-methods-align    实现 19 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
 [PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应
-[PASS] cli-commands-align   25 个命令，README 与 docs/CLI.md 的表与实现一致
+[PASS] cli-commands-align   26 个命令，README 与 docs/CLI.md 的表与实现一致
 [PASS] versions-align       FFmpeg 9.0.1；SDL3 3.4.16；PP_ABI_VERSION 2；Cordis 4.0.0-rc.9
 [PASS] third-party-notices  与当前依赖一致，且含 GPL v3 义务说明
 [PASS] doc-links            27 条相对链接全部可解析
@@ -1052,7 +1052,7 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 | 框架 | Qt5.12 界面 + qmake | 无 GUI 框架，SDL3 直接画 |
 | 解码 API | FFmpeg 3.4（`avcodec_decode_video2` 等，已删除） | FFmpeg 9.0.1（`send_packet/receive_frame`、`AVChannelLayout`） |
 | 渲染/音频 | SDL2.0.7 | SDL3.4.16（`SDL_AudioStream` + 频率比变速） |
-| 可扩展性 | 功能写死在 `videoctl.cpp` | **全部功能插件化**，5 个原生插件 + 3 个 JS 插件 |
+| 可扩展性 | 功能写死在 `videoctl.cpp` | **全部功能插件化**，6 个原生插件 + 3 个 JS 插件 |
 | 外部控制 | 无 | JSON-RPC 控制通道 |
 | 精确 seek | 无 | 有（seek 后丢帧对齐，`dropBefore_`） |
 | 硬件解码 | 无 | **有**（D3D11VA，自动回退软解；实测减少丢帧，见验证结果 §16） |

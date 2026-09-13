@@ -347,7 +347,7 @@ def t_commands_live():
     for kw in ("effect.set", "snapshot", "stats"):
         assert kw in txt, "命令列表缺少 %r" % kw
     m = re.search(r"共 (\d+) 个命令", txt)
-    assert m and int(m.group(1)) == 15, "命令数应为 15，实际 %s" % (m.group(1) if m else "?")
+    assert m and int(m.group(1)) == 16, "命令数应为 16，实际 %s" % (m.group(1) if m else "?")
     return True, "退出码 0，15 个命令"
 
 

@@ -146,6 +146,9 @@ private:
     float              videoRectX_ = 0.0f, videoRectY_ = 0.0f;
     float              videoRectW_ = 0.0f, videoRectH_ = 0.0f;
     bool               videoRectValid_ = false;
+    /* 字幕能力通道（P1-c）：上一帧广播过的 subtitle.line 文本，用于"只在变化时广播"，
+     * 避免每帧都发事件。 */
+    std::string        lastSubLine_;
     std::string        mediaPath_;
     std::string        lastError_;
 

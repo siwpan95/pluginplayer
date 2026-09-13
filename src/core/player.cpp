@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cctype>
+#include <fstream>
 
 extern "C" {
 #include <libavutil/time.h>
@@ -205,6 +207,13 @@ bool Player::open(const std::string& path) {
     if (vStream_ >= 0 && !openVideoCodec(vStream_)) { close(); return false; }
     if (aStream_ >= 0 && !openAudioCodec(aStream_)) { close(); return false; }
 
+    /* 字幕流：能开就开，开不了也不致命（只是没字幕）。 */
+    sStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_SUBTITLE, -1, -1, nullptr, 0);
+    if (sStream_ >= 0 && !openSubtitleCodec(sStream_)) {
+        PP_WARN("字幕解码器打开失败，继续播放（无字幕）");
+        sStream_ = -1;
+    }
+
     duration_ = (fmt_->duration != AV_NOPTS_VALUE)
                     ? (double)fmt_->duration / AV_TIME_BASE
                     : 0.0;
@@ -254,6 +263,11 @@ bool Player::open(const std::string& path) {
     vDrained_ = false;
     aDrained_ = false;
     {
+        std::lock_guard<std::mutex> lk(subMu_);
+        subCues_.clear();
+        subExternal_ = false;
+    }
+    {
         std::lock_guard<std::mutex> lk(statMu_);
         decodedFrames_ = displayedFrames_ = droppedFrames_ = 0;
         fpsWindowStart_ = 0.0;
@@ -275,6 +289,7 @@ bool Player::open(const std::string& path) {
     demuxTh_ = std::thread(&Player::demuxLoop, this);
     if (vStream_ >= 0) vdecTh_ = std::thread(&Player::videoDecodeLoop, this);
     if (aStream_ >= 0) adecTh_ = std::thread(&Player::audioDecodeLoop, this);
+    if (sStream_ >= 0) sdecTh_ = std::thread(&Player::subtitleDecodeLoop, this);
 
     PP_INFO("已打开媒体: %s", path.c_str());
     return true;
@@ -400,6 +415,203 @@ bool Player::openAudioCodec(int idx) {
     return true;
 }
 
+/* ---------------- 字幕解码（P1-c 能力通道） ----------------
+ *
+ * 轻路线：只用 FFmpeg 自带的文本字幕解码（AV_CODEC_ID_SUBRIP / ASS），
+ * 不引入 libass。解码出 SUBTITLE_TEXT / SUBTITLE_ASS 后只保留纯文本（剥离 ASS
+ * 样式标签），时间轴以 pts + start/end_display_time 计算，存进 subCues_。
+ * 渲染由 subtitles 插件在 osd.draw 阶段做 —— 内核在这里**只解码、不画**。 */
+
+/** 轻路线：剥离 ASS / 字幕样式标签（花括号包围的 {\...}），只留文本与换行。
+ *  顺带折叠 \r、去掉整段首尾空行，把多行字幕压成稳定的纯文本。 */
+static std::string stripAssTags(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    bool inTag = false;
+    for (char c : s) {
+        if (c == '{') { inTag = true; continue; }
+        if (c == '}') { inTag = false; continue; }
+        if (!inTag) out.push_back(c);
+    }
+    std::string cleaned;
+    cleaned.reserve(out.size());
+    bool prevNl = false;
+    for (char c : out) {
+        if (c == '\r') continue;
+        if (c == '\n') {
+            if (!prevNl) cleaned.push_back('\n');
+            prevNl = true;
+        } else {
+            prevNl = false;
+            cleaned.push_back(c);
+        }
+    }
+    size_t a = cleaned.find_first_not_of(" \t\n");
+    if (a == std::string::npos) return "";
+    size_t b = cleaned.find_last_not_of(" \t\n");
+    return cleaned.substr(a, b - a + 1);
+}
+
+bool Player::openSubtitleCodec(int idx) {
+    AVStream* st = fmt_->streams[idx];
+    const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec) {
+        PP_WARN("找不到字幕解码器 (codec_id=%d)", (int)st->codecpar->codec_id);
+        return false;
+    }
+    sCtx_ = avcodec_alloc_context3(codec);
+    if (!sCtx_) return false;
+    if (avcodec_parameters_to_context(sCtx_, st->codecpar) < 0) {
+        avcodec_free_context(&sCtx_);
+        return false;
+    }
+    sCtx_->pkt_timebase = st->time_base;
+    if (avcodec_open2(sCtx_, codec, nullptr) < 0) {
+        PP_WARN("avcodec_open2(字幕) 失败");
+        avcodec_free_context(&sCtx_);
+        return false;
+    }
+    PP_INFO("已打开字幕解码器: %s", codec->name);
+    return true;
+}
+
+void Player::subtitleDecodeLoop() {
+    AVStream* st = fmt_->streams[sStream_];
+    AVRational tb = st->time_base;
+    AVPacket* pkt = av_packet_alloc();
+    AVSubtitle sub{};
+    double nextPts = 0.0;
+    int lastQSerial = -1;
+    while (!abort_) {
+        int serial = 0;
+        int r = sq_.get(pkt, 1, &serial);
+        if (r < 0) break;
+        if (r == 0) continue;
+
+        /* 序号变化 = seek/flush：由本线程安全地重置解码器（与音视频解码一致）。 */
+        if (serial != lastQSerial) {
+            avcodec_flush_buffers(sCtx_);
+            lastQSerial = serial;
+        }
+        const bool isDrain = (pkt->data == nullptr);
+
+        int got = 0;
+        if (!isDrain)
+            avcodec_decode_subtitle2(sCtx_, &sub, &got, pkt);
+        else
+            avcodec_decode_subtitle2(sCtx_, &sub, &got, nullptr);  /* drain：逼出剩余字幕 */
+
+        if (got) {
+            double base = (sub.pts != AV_NOPTS_VALUE)
+                              ? (double)sub.pts * av_q2d(tb)
+                              : nextPts;
+            for (unsigned i = 0; i < sub.num_rects; ++i) {
+                AVSubtitleRect* rct = sub.rects[i];
+                std::string raw;
+                if (rct->type == SUBTITLE_TEXT && rct->text) raw = rct->text;
+                else if (rct->type == SUBTITLE_ASS && rct->ass) raw = rct->ass;
+                else continue;
+                std::string text = stripAssTags(raw);
+                if (text.empty()) continue;
+                double s = base + (double)sub.start_display_time / 1000.0;
+                double e = base + (double)sub.end_display_time / 1000.0;
+                if (e <= s) e = s + 2.0;   /* 防御：没有时长时给 2 秒 */
+                /* seek/flush 之后作废在途旧包的字幕，避免把旧时间轴混进新轴。
+                 * 外部字幕加载后（subExternal_）忽略内嵌，避免两套字幕打架。 */
+                if (serial == sq_.serial()) {
+                    std::lock_guard<std::mutex> lk(subMu_);
+                    if (!subExternal_) subCues_.push_back({s, e, text});
+                }
+            }
+            avsubtitle_free(&sub);
+            nextPts = base;
+        }
+
+        if (!isDrain) av_packet_unref(pkt);
+        if (isDrain) break;   /* 排空即结束本线程 */
+    }
+    av_packet_free(&pkt);
+}
+
+bool Player::hasSubtitles() const {
+    if (subExternal_) return true;
+    std::lock_guard<std::mutex> lk(subMu_);
+    return !subCues_.empty();
+}
+
+void Player::currentSubtitle(double pts, std::string& out) const {
+    out.clear();
+    std::lock_guard<std::mutex> lk(subMu_);
+    for (const auto& c : subCues_) {
+        if (pts >= c.start && pts < c.end) { out = c.text; return; }
+    }
+}
+
+void Player::loadExternalSubtitles(const std::vector<SubCue>& cues) {
+    std::lock_guard<std::mutex> lk(subMu_);
+    subCues_ = cues;
+    subExternal_ = true;
+}
+
+static bool parseSrtTime(const std::string& t, double& out) {
+    int h = 0, m = 0, s = 0, ms = 0;
+    char sep = 0;
+    if (std::sscanf(t.c_str(), "%d:%d:%d%c%d", &h, &m, &s, &sep, &ms) >= 5) {
+        out = (double)h * 3600.0 + (double)m * 60.0 + (double)s + (double)ms / 1000.0;
+        return true;
+    }
+    return false;
+}
+
+std::vector<SubCue> Player::parseSrt(const std::string& path) {
+    std::vector<SubCue> cues;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return cues;
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    if (content.empty()) return cues;
+
+    /* 统一成行数组（去 \r） */
+    std::vector<std::string> lines;
+    {
+        std::string cur;
+        for (char c : content) {
+            if (c == '\r') continue;
+            if (c == '\n') { lines.push_back(cur); cur.clear(); }
+            else cur.push_back(c);
+        }
+        if (!cur.empty()) lines.push_back(cur);
+    }
+
+    size_t i = 0;
+    while (i < lines.size()) {
+        while (i < lines.size() && lines[i].empty()) i++;
+        if (i >= lines.size()) break;
+        /* 序号行（纯数字）可选：跳过 */
+        size_t idx = i;
+        bool allNum = true;
+        for (char c : lines[idx]) if (!std::isdigit((unsigned char)c)) { allNum = false; break; }
+        if (allNum) idx++;
+        if (idx >= lines.size()) break;
+        const std::string& tl = lines[idx];
+        size_t arrow = tl.find("-->");
+        if (arrow == std::string::npos) { i = idx + 1; continue; }
+        double start = 0, end = 0;
+        if (!parseSrtTime(trim(tl.substr(0, arrow)), start) ||
+            !parseSrtTime(trim(tl.substr(arrow + 3)), end)) { i = idx + 1; continue; }
+        std::string text;
+        size_t j = idx + 1;
+        while (j < lines.size() && !lines[j].empty()) {
+            if (!text.empty()) text += '\n';
+            text += lines[j];
+            j++;
+        }
+        if (!text.empty()) cues.push_back({start, end, text});
+        i = j;
+    }
+    return cues;
+}
+
 void Player::close() {
     if (!opened_ && !fmt_) return;
     abort_ = true;
@@ -415,6 +627,7 @@ void Player::close() {
     if (demuxTh_.joinable()) demuxTh_.join();
     if (vdecTh_.joinable())  vdecTh_.join();
     if (adecTh_.joinable())  adecTh_.join();
+    if (sdecTh_.joinable())   sdecTh_.join();
 
     vq_.flush();
     aq_.flush();
@@ -437,12 +650,13 @@ void Player::close() {
     if (vCtx_) avcodec_free_context(&vCtx_);
     closeHwDevice();      /* avcodec_free_context 会放开它自己那份 hw_device_ctx 引用 */
     if (aCtx_) avcodec_free_context(&aCtx_);
+    if (sCtx_) avcodec_free_context(&sCtx_);
     if (fmt_)  avformat_close_input(&fmt_);
 
     swsW_ = swsH_ = 0;
     swsFmt_ = -1;
     swsCs_ = swsRange_ = -1;
-    vStream_ = aStream_ = -1;
+    vStream_ = aStream_ = sStream_ = -1;
     opened_ = false;
     eof_ = false;
     PP_INFO("已关闭媒体");
@@ -507,6 +721,7 @@ void Player::demuxLoop() {
                      * 解码线程把 data==nullptr 当作"drain 空包"，会造成提前收尾。 */
                     if (vStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) vq_.put(e); }
                     if (aStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) aq_.put(e); }
+                    if (sStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) sq_.put(e); }
                     drainSent_ = true;
                     demuxFinished_ = true;
                     eof_ = true;
@@ -528,6 +743,7 @@ void Player::demuxLoop() {
                      * 解码线程把 data==nullptr 当作"drain 空包"，会造成提前收尾。 */
                     if (vStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) vq_.put(e); }
                     if (aStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) aq_.put(e); }
+                    if (sStream_ >= 0) { AVPacket* e = av_packet_alloc(); if (e) sq_.put(e); }
                     drainSent_ = true;
                     demuxFinished_ = true;
                     eof_ = true;
@@ -545,6 +761,8 @@ void Player::demuxLoop() {
             vq_.put(pkt);
         } else if (pkt->stream_index == aStream_) {
             aq_.put(pkt);
+        } else if (sStream_ >= 0 && pkt->stream_index == sStream_) {
+            sq_.put(pkt);
         } else {
             av_packet_free(&pkt);
         }
