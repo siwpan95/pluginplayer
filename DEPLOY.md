@@ -216,6 +216,20 @@ F:\Python314\python.exe tools\gitee_release.py attach --name pluginplayer ^
 - **发布页上 Gitee 自动附的源码包链接不是直链**：匿名 HTTP 客户端拿到的是一段 HTML。
   GPL 义务要求的源码指向写 `git clone` 地址，不要依赖那两个链接。
 - 上传 47.9MB 实测约 20 秒；单附件超过 100MB 会被拒。
+- **`git push` 到 Gitee 报 `send-pack: unexpected disconnect while reading sideband packet`
+  （2026-09-14 实测）**：HTTP/2 下推送会在握手后被服务端断开，命令挂到超时。
+  解法是强制 HTTP/1.1 —— `git config http.version HTTP/1.1`（或 `git -c http.version=HTTP/1.1 push`）。
+  拉取不受影响，只有 push 会踩。
+- **建发行版必须给 `target_commitish`（2026-09-14 实测）**：不传时接口返回
+  `400 {'messages': ['target_commitish is missing']}`。`gitee_release.py release` 要加
+  `--branch main`（DEPLOY.md 早先的示例没带这个参数，已失效）。
+- **附件上传路径必须带 `/api/v5` 前缀**：`upload_file()` 自己建 HTTPS 连接，不像 `api()`
+  那样补前缀。漏了前缀会 POST 到网页路由，服务端回 **404 HTML** —— 表现为"上传失败却看不出
+  是路径问题"。已修（见 `upload_attachments()` 的 `API_PREFIX`）。
+- **`git tag -a` 要求仓库已配身份**：没有 `user.name`/`user.email` 时会以 128 失败
+  （`unable to auto-detect email address`）。新克隆的仓库记得先 `git config`。
+- **`release` 子命令作用在本地仓库上**：`--repo` 默认取脚本所在仓库根，
+  从别处调脚本时要显式传 `--repo <本地克隆路径>`，否则会在非 git 目录里跑 `git tag`。
 
 ### 发布前逐条打勾
 

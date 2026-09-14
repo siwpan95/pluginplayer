@@ -52,6 +52,7 @@ import urllib.request
 import uuid
 
 API = "https://gitee.com/api/v5"
+API_PREFIX = "/api/v5"       # upload_file 自己建连接，路径要自带这一段（api() 才会补）
 MAX_ATTACH_MB = 100.0        # Gitee 社区版单附件上限（见文件头）
 
 
@@ -262,7 +263,11 @@ def upload_attachments(args, token, files):
                   % (i, len(files), name, mb, MAX_ATTACH_MB))
             fail.append((name, "超过 %.0fMB" % MAX_ATTACH_MB))
             continue
-        url = "%s/releases/%s/attach_files?access_token=%s" % (repo_path(args), rel["id"], token)
+        # upload_file 直接对 gitee.com 建连接，path 必须自带 /api/v5 前缀。
+        # 早期版本这里用了 repo_path() 的相对路径（/repos/...），少了前缀会 POST 到
+        # 网页路由，服务端返回 404 HTML —— 表现是"上传失败但看不出是路径问题"。
+        url = "%s%s/releases/%s/attach_files?access_token=%s" % (
+            API_PREFIX, repo_path(args), rel["id"], token)
         t0 = time.time()
         try:
             st, txt = upload_file(url, token, path)
