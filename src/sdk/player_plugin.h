@@ -382,6 +382,36 @@ typedef struct PP_VideoColorService {
     int      (*is_hdr)(void);             /* 0/1：BT.2020 原色 + PQ/HLG 传输 */
 } PP_VideoColorService;
 
+/* video.display 服务类型（P2-L2） -------------------------------------------
+ * 内核经 register_service("video.display", ...) 暴露**输出链路**的 HDR 能力，
+ * 插件用 get_service("video.display") 取这个结构体指针。与 video.color 的语义
+ * 分工：
+ *   - video.color  = "这一帧内容是什么"（每帧上传时刷新，随内容变）
+ *   - video.display= "这条输出链路能干什么"（窗口/显示器/渲染器的静态属性）
+ *
+ * **为什么不把这两个字段追加到 PP_VideoColorService 上**（虽然文档说该结构
+ * 不进 PP_ABI_VERSION、可以演进）：插件是按 C 结构体偏移直接读字段的，追加
+ * 字段后"新插件 + 旧宿主"会去读旧宿主那份静态结构体之外的内存 —— 那是**函数
+ * 指针**，读出来就是野指针，调用即崩，而 get_service 只返回 void*，插件没有
+ * 任何办法判断宿主那份有多大。拆成独立服务名之后，"旧宿主"这个组合自然
+ * 退化为 get_service 返回 NULL，插件一句 `if (!svc) …` 就优雅退回了。
+ * 代价只是多存一个服务名，收益是**任何版本组合都不会崩**。
+ *
+ * 因此本结构与 PP_VideoColorService 一样**不进 PP_ABI_VERSION**（它经
+ * get_service 取用，不是 PP_HostApi 的字段）。 */
+typedef struct PP_DisplayService {
+    /** 显示器自陈是否具备高于 SDR 白点的 HDR 余量
+     *  （SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN）。1=支持，0=不支持或**尚未探测**。
+     *  注意这只是"显示器说它行"：SDL 文档明确写该属性仅供信息/诊断用途，
+     *  并非所有平台都在显示级别提供它。要判断输出是否真的走了 HDR，
+     *  用下面的 hdr_active。 */
+    int (*hdr_capable)(void);
+    /** 渲染器的输出色彩空间当前是否为 HDR（SRGB_LINEAR）。这是**做过的事**，
+     *  不是"能做":内核把渲染器真正重建成功后才置 1；显示器不支持 HDR 或重建
+     *  失败回退 SDR 时都是 0。HDR→SDR 色调映射的 auto 判据用它。 */
+    int (*hdr_active)(void);
+} PP_DisplayService;
+
 typedef struct PP_HostApi {
     uint32_t     abi_version;
     uint32_t     struct_size;     /* 宿主填入 sizeof(PP_HostApi)，插件可据此判断字段可用性 */

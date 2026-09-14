@@ -88,6 +88,19 @@ static PP_VideoColorService g_videoColorService = {
     &svcVideoCurCs, &svcVideoPri, &svcVideoTrc, &svcVideoMat, &svcVideoRange, &svcVideoHdr
 };
 
+/* P2-L2：video.display 服务 —— 输出链路的 HDR 能力（同样经 get_service，不进 ABI）。
+ * 与 video.color 分成两个服务名，是为了让"新插件 + 旧宿主"退化成 get_service
+ * 返回 NULL（插件优雅退回），而不是按偏移读到越界的函数指针（详见 SDK 头注释）。 */
+static int svcDisplayHdrCapable() {
+    return (s_colorApp && s_colorApp->displayHdrCapable()) ? 1 : 0;
+}
+static int svcDisplayHdrActive() {
+    return (s_colorApp && s_colorApp->hdrOutputActive()) ? 1 : 0;
+}
+static PP_DisplayService g_displayService = {
+    &svcDisplayHdrCapable, &svcDisplayHdrActive
+};
+
 bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     /* 防御性钳位：即使调用方漏了校验，也不让越界尺寸流到 SDL。
      * 越界尺寸会在 SDL_RenderReadPixels / 纹理分配处触发 int32 溢出崩溃。 */
@@ -136,6 +149,13 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
     SDL_SetRenderVSync(ren_, 1);
     SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_BLEND);
 
+    /* P2-L2：建完窗口就探一次显示端 HDR 能力，让 video.display 从第一帧起就可信
+     * （否则该值要等第一帧 HDR 内容触发 ensureHdrOutput_ 才有意义，auto 判据会在
+     *  HDR 首帧上多映射一次）。失败/无显示器时的落点是"不支持"，与 SDR 输出一致。 */
+    refreshDisplayHdrCapability_();
+    PP_INFO("显示端 HDR 能力: capable=%d（输出链路 HDR: %d）",
+            dispHdrCapable_ ? 1 : 0, hdrOutputActive_ ? 1 : 0);
+
     /* 宿主与插件 */
     std::string appDir = exeDir();
     if (!host_.init(appDir)) return false;
@@ -145,6 +165,9 @@ bool App::init(int winW, int winH, bool hidden, bool audioEnabled) {
      * 放在 host_.init 之后：api_ 此时已 buildApi 完成；插件经 get_service 在运行时取用。 */
     s_colorApp = this;
     host_.api()->register_service(host_.handle(), "video.color", "1.0.0", &g_videoColorService);
+    /* P2-L2：显示端能力服务（video_tonemap 的 auto 判据用它；结构见 SDK 头）。
+     * 放在建完窗口之后，probe 才有 displayID 可查 —— 见下方 refresh 调用。 */
+    host_.api()->register_service(host_.handle(), "video.display", "1.0.0", &g_displayService);
     /* P1-e：把字幕 ASS 事件（header / 每帧 dialogue）经事件总线转发出去，
      * 供 subtitles 插件用 libass 渲染（不进 ABI，单一字幕源在内核）。 */
     player_.setSubtitlePublisher([this](const char* t, const char* j) {
@@ -730,6 +753,16 @@ bool App::makeFrameView(const std::shared_ptr<VideoFrame>& f, PP_FrameView* view
     return true;
 }
 
+/* P2-L2：把一帧当作 SDR 处理时的 SDL 色彩空间 —— 只用它自己的矩阵 + 范围，
+ * primaries/trc 留默认的 UNSPECIFIED，让 sdlColorspaceFor 走矩阵分支。
+ * 用于"NV12 + HDR10 被后端拒绝"时的降级（见 pumpAndUpload 里的回退分支）。 */
+static int sdrMatrixColorspaceOf(const VideoFrame& f) {
+    YuvColorChoice sdr;                 /* primaries/trc 默认 2 = UNSPECIFIED */
+    sdr.matrix = f.colorMatrix;
+    sdr.fullRange = f.fullRange;
+    return sdlColorspaceFor(sdr, nullptr);
+}
+
 bool App::pumpAndUpload(bool force) {
     if (!player_.isOpen()) return false;
 
@@ -784,31 +817,13 @@ bool App::pumpAndUpload(bool force) {
      * `texCs_ != cs` 永远成立 —— NV12 纹理每帧都被销毁重建（4K 每帧 12 MB 反复分配）。
      * 这个 bug 只影响 NV12 分支（RGBA 分支该判据被 !useRgba 短路），
      * 也就是会**专门把 NV12 的账算坏**。 */
-    int cs = 0;
-    if (!useRgba) {
-        /* 矩阵与范围必须告诉 SDL，否则 GPU 会用默认（JPEG/全范围 BT.601）
-         * 去还原 —— 顺序反了就是整幅偏色。 */
-        YuvColorChoice cc;
-        cc.matrix = frame->colorMatrix;
-        cc.fullRange = frame->fullRange;
-        int fellBack = 0;
-        cs = sdlColorspaceFor(cc, &fellBack);
-        if (fellBack && !texCsFellBackWarned_) {
-            texCsFellBackWarned_ = true;
-            PP_WARN("该色彩矩阵在 SDL 里没有对应枚举（FCC/SMPTE240M），"
-                    "NV12 纹理按 BT.601 处理");
-        }
-        /* P2-L1：把这一帧的色彩元数据记下来，供 video.color 服务暴露给插件；
-         * 同时 HDR 内容首次出现时最好努力把渲染器输出切到 HDR（仅当显示器真的
-         * 支持 HDR —— 否则不重建、维持 SDR，SDL 自动做 HDR→SDR 色调映射）。 */
-        curVideoCs_ = (uint32_t)cs;
-        curPrimaries_ = cc.primaries;
-        curTrc_ = cc.trc;
-        curMatrix_ = cc.matrix;
-        curFullRange_ = cc.fullRange;
-        curIsHdr_ = isHdrColorChoice(cc);
-        if (curIsHdr_) ensureHdrOutput_();
-    }
+    int cs = updateColorSnapshot_(frame.get());
+
+    /* P2-L2：HDR10 的 NV12 纹理一旦被后端拒过，整段会话就改用降级色彩空间，
+     * **只试一次**。否则每帧都会"先失败一次、再重建一次"——既回到"NV12 纹理
+     * 每帧销毁重建"的老毛病（4K 每帧 12 MB 反复分配），又会把告警刷满。 */
+    if (nv12Hdr10Unsupported_ && cs == (int)PP_SDL_CS_HDR10)
+        cs = sdrMatrixColorspaceOf(*frame);
 
     if (!tex_ || texW_ != frame->w || texH_ != frame->h || texFmt_ != fmt ||
         (!useRgba && texCs_ != cs)) {
@@ -823,6 +838,36 @@ bool App::pumpAndUpload(bool force) {
             SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, (Sint64)cs);
         tex_ = SDL_CreateTextureWithProperties(ren_, props);
         SDL_DestroyProperties(props);
+        if (!tex_ && !useRgba && cs != 0) {
+            /* P2-L2：HDR 色彩空间的回退。本机 D3D11 实测：把 NV12 纹理标成
+             * HDR10（0x12002600）会被拒 —— `创建纹理失败: Unsupported YUV
+             * colorspace`。**不回退的后果是 HDR 素材整段黑屏**（建纹理失败 →
+             * update 失败 → 帧根本画不上去），比"颜色不准"严重得多。
+             *
+             * 这条路径之所以长期没暴露：以前色彩快照只在 NV12 分支里更新，
+             * 而真到建纹理那一步多半已经走 RGBA 分支了 —— 也就是说 HDR10 的
+             * NV12 纹理其实从没被真正建过。修好色彩元数据回写后它立刻显形。
+             *
+             * 回退目标 = 内容自己的矩阵 + 范围（=当作 SDR 处理，primaries/trc
+             * 传默认的 UNSPECIFIED 让 sdlColorspaceFor 走矩阵分支）。画面因此是
+             * 亮的、颜色接近，只是少了 SDL 的 HDR→SDR 色调映射。渲染器真的切到
+             * HDR 输出时不受影响（那条路径下显示端通常支持该色彩空间）。 */
+            const char* err = SDL_GetError();
+            const int csSdr = sdrMatrixColorspaceOf(*frame);
+            PP_WARN("NV12 纹理不支持色彩空间 0x%x（%s）：本次会话改用 SDR 色彩空间 0x%x",
+                    cs, err, csSdr);
+            nv12Hdr10Unsupported_ = true;
+            SDL_PropertiesID p2 = SDL_CreateProperties();
+            SDL_SetNumberProperty(p2, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, (Sint64)fmt);
+            SDL_SetNumberProperty(p2, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
+                                  SDL_TEXTUREACCESS_STREAMING);
+            SDL_SetNumberProperty(p2, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, frame->w);
+            SDL_SetNumberProperty(p2, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, frame->h);
+            SDL_SetNumberProperty(p2, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, (Sint64)csSdr);
+            tex_ = SDL_CreateTextureWithProperties(ren_, p2);
+            SDL_DestroyProperties(p2);
+            if (tex_) cs = csSdr;               /* 记下**实际**用的值，别让判据空转重建 */
+        }
         if (!tex_) {
             PP_ERROR("创建纹理失败: %s", SDL_GetError());
             texW_ = texH_ = 0;   /* 别留下"已经有纹理"的假状态，下一轮还能重建 */
@@ -846,17 +891,61 @@ bool App::pumpAndUpload(bool force) {
 
 /* ======================= 渲染 ======================= */
 
+/* P2-L2：色彩快照的**唯一**计算点。
+ *
+ * 抽成方法而不是留在 pumpAndUpload 里，是因为自检的 decode_and_display 循环
+ * 不走 pumpAndUpload（它为了测量真实管线刻意绕开了去重与上传），于是原先
+ * 那个循环里 video.color 快照永远停留在初值 —— 表现就是"自检能过、但 HDR 色调
+ * 映射一次都没被跑过"，而 ① 原色/传输函数没写回帧 这个 bug 也因此长期隐身。
+ * 现在宿主与自检共用这一个函数，回归会直接被门禁抓住。 */
+int App::updateColorSnapshot_(const VideoFrame* frame) {
+    if (!frame) return 0;
+    YuvColorChoice cc;
+    cc.matrix = frame->colorMatrix;
+    cc.fullRange = frame->fullRange;
+    cc.primaries = frame->colorPrimaries;
+    cc.trc = frame->colorTrc;
+    int fellBack = 0;
+    const int cs = sdlColorspaceFor(cc, &fellBack);
+    if (fellBack && !texCsFellBackWarned_) {
+        texCsFellBackWarned_ = true;
+        PP_WARN("该色彩矩阵在 SDL 里没有对应枚举（FCC/SMPTE240M），"
+                "NV12 纹理按 BT.601 处理");
+    }
+    /* P2-L1：把这一帧的色彩元数据记下来，供 video.color 服务暴露给插件；
+     * 同时 HDR 内容首次出现时最好努力把渲染器输出切到 HDR（仅当显示器真的
+     * 支持 HDR —— 否则不重建、维持 SDR，SDL 自动做 HDR→SDR 色调映射）。 */
+    curVideoCs_ = (uint32_t)cs;
+    curPrimaries_ = cc.primaries;
+    curTrc_ = cc.trc;
+    curMatrix_ = cc.matrix;
+    curFullRange_ = cc.fullRange;
+    curIsHdr_ = isHdrColorChoice(cc);
+    if (curIsHdr_) ensureHdrOutput_();
+    return cs;
+}
+
+void App::refreshDisplayHdrCapability_() {
+    if (!win_) { dispHdrCapable_ = false; return; }
+    SDL_DisplayID disp = SDL_GetDisplayForWindow(win_);
+    SDL_PropertiesID dp = SDL_GetDisplayProperties(disp);
+    /* SDL 文档明确：该属性"仅供信息与诊断用途，并非所有平台都在显示级别提供"，
+     * 所以取不到就是 false —— 宁可少报支持，也不要凭空宣称 HDR 直通可用。 */
+    dispHdrCapable_ = SDL_GetBooleanProperty(dp, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+    SDL_DestroyProperties(dp);
+}
+
 void App::ensureHdrOutput_() {
     if (hdrOutputConfigured_) return;
     hdrOutputConfigured_ = true;   /* 只尝试一次，无论成败都不再重入 */
 
+    /* 复核一次显示器能力：窗口可能在 init 之后被拖到了另一块显示器上
+     * （SDL 的 HDR_enabled 是按 displayID 报的），拖到 SDR 屏上就不该再切 HDR。 */
+    refreshDisplayHdrCapability_();
+
     /* 显示器不支持 HDR：维持默认 SDR 输出（纹理已标 HDR10，SDL 自动做 HDR→SDR
      * 色调映射回退）。这是绝大多数环境（dummy 驱动 / 普通 SDR 屏）的落点。 */
-    SDL_DisplayID disp = SDL_GetDisplayForWindow(win_);
-    SDL_PropertiesID dp = SDL_GetDisplayProperties(disp);
-    bool hdrDisp = SDL_GetBooleanProperty(dp, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
-    SDL_DestroyProperties(dp);
-    if (!hdrDisp) {
+    if (!dispHdrCapable_) {
         PP_INFO("显示器不支持 HDR：维持 SDR 输出（HDR 纹理由 SDL 做 HDR→SDR 色调映射）");
         return;
     }
@@ -864,7 +953,7 @@ void App::ensureHdrOutput_() {
     SDL_PropertiesID rprops = SDL_GetRendererProperties(ren_);
     Uint32 cur = (Uint32)SDL_GetNumberProperty(rprops, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER, 0);
     SDL_DestroyProperties(rprops);
-    if (cur == PP_SDL_CS_SRGB_LINEAR) return;
+    if (cur == PP_SDL_CS_SRGB_LINEAR) { hdrOutputActive_ = true; return; }
 
     PP_INFO("显示器支持 HDR：重建渲染器以启用 HDR 输出 (SRGB_LINEAR)");
     /* 先把现有纹理与叠加层作废，让它们随下一帧 / 下一调用重建（renderOverlays
@@ -884,10 +973,17 @@ void App::ensureHdrOutput_() {
         PP_WARN("HDR 渲染器创建失败（%s），回退默认 SDR 渲染器", SDL_GetError());
         r = SDL_CreateRenderer(win_, nullptr);
         if (!r) { lastError_ = format("SDL_CreateRenderer 失败: %s", SDL_GetError()); return; }
+    } else {
+        /* 只有真的建成 HDR 渲染器才算"输出链路已 HDR" —— 回退分支必须保持 false，
+         * 否则色调映射的 auto 会把 HDR 内容直通给一条其实是 SDR 的链路。 */
+        hdrOutputActive_ = true;
     }
     ren_ = r;
     SDL_SetRenderVSync(ren_, 1);
     SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_BLEND);
+    /* 换了渲染器就重新给 HDR10 的 NV12 纹理一次机会（HDR 输出后端通常支持它）。 */
+    nv12Hdr10Unsupported_ = false;
+    PP_INFO("HDR 输出链路状态: active=%d", hdrOutputActive_ ? 1 : 0);
 }
 
 void App::renderFrame() {
@@ -1187,6 +1283,19 @@ int App::selfTest(const std::string& media, int frames, const std::string& outDi
             if (frame && frame->index != lastSeenIdx) {
                 stall = 0;
                 lastSeenIdx = frame->index;
+                /* P2-L2：这个循环刻意绕开了 pumpAndUpload（不去重、不上传，量的才是
+                 * 真实播放管线），但**不能**因此把插件的两条输入也一起绕掉：
+                 *   - updateColorSnapshot_()：video.color / video.display 的数据源。
+                 *     不调它，HDR 内容永远不被识别，色调映射的 auto 在自检里恒不激活；
+                 *   - tickPlugins()：PP_TOPIC_APP_TICK 的唯一发布点。只按 tick 刷新状态
+                 *     的插件（video_tonemap、osd_stats）在自检里就完全不工作。
+                 * 于是"自检全绿"与"功能可用"之间曾经有一道缝 —— P2-L2 就是从这里
+                 * 发现 HDR 原色/传输函数从未写回帧的。补上这两处，缝就没了。
+                 * 位置与 run() 一致（先更色彩快照、再 tick），且**按帧**调用而不是按
+                 * 忙等轮次 —— tickPlugins 里的音频快照是按调用次数算的，放在忙等循环里
+                 * 会按空转次数反复重算。 */
+                updateColorSnapshot_(frame.get());
+                tickPlugins();
 
                 /* 只有"链上有处理器"或"这一帧要存 PNG 证据"时才需要 RGBA。
                  * **不要无条件物化** —— 那会让自检本身退化成慢路径，于是 2160p 上的

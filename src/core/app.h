@@ -73,6 +73,13 @@ public:
     int      curVideoFullRange()  const { return curFullRange_; }
     bool     curVideoIsHdr()      const { return curIsHdr_; }
 
+    /* P2-L2：video.display 服务用的显示端/输出链路能力（不进 ABI） */
+    /** 显示器自陈支持 HDR（SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN 的快照）。 */
+    bool displayHdrCapable() const { return dispHdrCapable_; }
+    /** 渲染器当前是否真的以 HDR 色彩空间输出（SRGB_LINEAR）。
+     *  只有重建成功才为真；不支持 HDR / 重建失败回退 SDR 时都是假。 */
+    bool hdrOutputActive() const { return hdrOutputActive_; }
+
 private:
     /* 主循环分步 */
     void pollEvents();
@@ -91,6 +98,13 @@ private:
     /** P2-L1：显示器支持 HDR 时把渲染器重建为 HDR 输出（SRGB_LINEAR 色彩空间），
      *  否则维持 SDR（SDL 自动做 HDR→SDR 色调映射）。只重建一次（hdrOutputConfigured_ 守卫）。 */
     void ensureHdrOutput_();
+    /** P2-L2：色彩快照的唯一计算点（pumpAndUpload 与自检循环共用）。
+     *  更新 cur*_ 六项、必要时切 HDR 输出，返回该帧的 SDL_Colorspace。 */
+    int  updateColorSnapshot_(const VideoFrame* frame);
+    /** P2-L2：刷新「显示器是否支持 HDR」快照（供 video.display 服务读）。
+     *  在 init() 建完窗口后探一次，ensureHdrOutput_() 里再复核一次 ——
+     *  窗口可能被拖到另一块显示器上（SDL 的显示属性是按 displayID 的）。 */
+    void refreshDisplayHdrCapability_();
     void renderFrame();
     void renderBuiltinOverlay();       /* 帮助/提示层（核心自带） */
     void stepAudioLead();
@@ -167,6 +181,12 @@ private:
     int      curFullRange_ = 0;
     bool     curIsHdr_ = false;
     bool     hdrOutputConfigured_ = false;
+    /* P2-L2：显示端/输出链路 HDR 能力快照（video.display 服务用） */
+    bool     dispHdrCapable_ = false;  /* 显示器自陈支持 HDR（未探测时也是 false） */
+    bool     hdrOutputActive_ = false; /* 渲染器当前确以 SRGB_LINEAR 输出 */
+    /* P2-L2：后端拒绝过"HDR10 的 NV12 纹理"（本机 D3D11 实测），之后整段会话
+     * 直接用降级色彩空间，避免每帧失败一次再重建。 */
+    bool     nv12Hdr10Unsupported_ = false;
     int64_t            lastUploadedIndex_ = -1;
     double             lastTickEmit_ = 0.0;
     /* 最近一次 renderFrame 算出的画面矩形（letterbox 之后的位置与尺寸），

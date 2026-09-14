@@ -410,7 +410,7 @@ pluginplayer/
 | `audio_device` | 枚举/切换音频输出设备（`audio.list` / `audio.set`），消费内核音频设备管理能力 |
 | `video_quality` | **画质链（按需挂帧处理器）**：亮度/对比度/饱和度/HDR 增益原地改写 RGBA；任一参数偏离默认才挂链、回默认即撤销；经 `video.color` 服务消费内核色彩元数据（HDR10/HLG/BT.709/601 矩阵+范围）；`quality.set`/`brightness`/`contrast`/`saturation`/`hdr` 命令 |
 | `radio_bridge` | 桥接 [private-radio-stations](https://gitee.com/siwpan/allin) 转播服务：worker 线程轮询 `/api/status`（winsock 直连，不进主线程）、台名→标题栏 + **OSD 状态面板**（转播绿/空闲灰/不可达橙 + 圆点指示 + 宽度自适应）、`radio.follow` 自动跟随收听（开转播自动 open `/hls`、停转播自动 stop）；`radio.status`/`base`/`poll`/`follow`/`playing` 命令 |
-| `video_tonemap` | **CPU 色调映射（Phase 1）**：HDR（PQ/HLG）→ SDR 的 BT.2390 族 EETF + gamut 软钳 + sRGB，帧链原地处理；`mode=auto` 只在源是 HDR 时挂链（SDR 源不破坏 NV12/GPU 快路径）；`tonemap.mode`/`strength`/`peak`/`status` 命令。Phase 2 换 libplacebo GPU 后端（见 §23） |
+| `video_tonemap` | **CPU 色调映射**：HDR（PQ/HLG）→ SDR 的 **BT.2390 逐段精确 EETF** + **BT.2020→BT.709 基色矩阵** + gamut 软钳 + sRGB，帧链原地处理；`mode=auto` = 源是 HDR **且** `video.display` 报输出链路非 HDR 才挂链（SDR 源不破坏 NV12/GPU 快路径）；**默认 off**（CPU 实测 0.4~1.0 fps@720p，仅供对照/离线，GPU 后端落地后改回 auto）；`tonemap.mode`/`strength`/`peak`/`status`。Phase 2 仅剩 libplacebo GPU 后端（见 §23） |
 
 ### JS 插件（`host-js/plugins/*.mjs`，Cordis）
 
@@ -1086,10 +1086,11 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 **P2-L1 内核 HDR 色彩空间映射 + video_quality 画质插件（commit `bab6937`）**
 
 - 内核读 `AVFrame.color_primaries` / `color_trc`（`VideoFrame` 加字段，`player.cpp` 读 codecpar 回退），映射 `SDL_Colorspace`：BT.2020+PQ→HDR10(`0x12002600`)、BT.2020+HLG→BT2020（SDL 无 HLG 枚举，已知限制）、其余按矩阵+范围（与 P2-L1 前行为一致）。
+  - ⚠️ **本节记述当时不成立，已于 §23 修复**：`VideoFrame` 的 `colorPrimaries`/`colorTrc` 字段确实加了，但 `player.cpp` **只把它们算进日志、从未写回帧**，`app.cpp` 也没带进 `YuvColorChoice` —— 于是 `video.color` 的 `is_hdr`/`transfer` 恒为"非 HDR"。实测证据与修复见 §23 的"顺带发现并修复的缺陷"。
 - 新增 `video.color` 服务（ABI 安全的 `get_service`，不进 `PP_ABI_VERSION`、不碰 `PP_MediaInfo`）：内核 App 快照最近帧色彩元数据并暴露 getter。
 - 新增 `video_quality` 插件（10 号原生插件）：亮度/对比度/饱和度/HDR 增益，仿 `video_effects` 的**按需挂链**（`qualityActive()` 判非默认才挂，链为空时渲染层走 NV12/GPU 路线，避免每帧多一次 RGBA 物化）；6 命令 + 1 服务。
 - HDR 输出重建：`ensureHdrOutput_()` 查 `SDL_GetDisplayProperties`/`HDR_enabled`，仅 HDR 显示器时把渲染器重建为 `SRGB_LINEAR`；否则维持 SDR（SDL 自动 HDR→SDR 色调映射，绝不抛错）。`hdrOutputConfigured_` 守卫只重建一次。
-- **诚实边界**：本机 selftest 用 SDL dummy 驱动、无真实 HDR 显示器，HDR 输出重建**无法肉眼验证**，靠单测（`test_color.cpp` 5 项 HDR 映射）+ 渲染器创建对 HDR10 不崩 + 优雅回退 SDR + SDR 无回归 + 门禁全绿覆盖。
+- **诚实边界**：本机自检走的是真实的 `windows` 视频驱动（日志 `sdl_init — SDL3 video driver=windows`；早先这里写的"SDL dummy 驱动"有误，已于 §23 更正），但**显示器本身没有 HDR 余量**（`video.display` 报 `capable=0`），HDR 输出重建**无法肉眼验证**，靠单测（`test_color.cpp` 5 项 HDR 映射）+ 渲染器创建对 HDR10 不崩 + 优雅回退 SDR + SDR 无回归 + 门禁全绿覆盖。
 
 **P2 radio_bridge 插件（commit `840b277`）+ P0 app.quit 退出延迟（commit `1a8ac2a`）**
 
@@ -1115,30 +1116,70 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 
 **验证（P2-L1 + P3 全量回归，2026-09-13）**：verify 18/18、unit 103/103、cli_check 24/24、selftest 15/15；radio 端到端 7/7、`npm run check` PASSED、单测 9/9。
 
-### 23. P2-3 色调映射两阶段：Phase 1 CPU（已交付）+ Phase 2 libplacebo GPU（计划）
+### 23. P2-3 色调映射两阶段：Phase 1 CPU（边界 ①②④ 已补齐）+ Phase 2 libplacebo GPU（仅剩 GPU 后端）
 
-**Phase 1（2026-09-14，11 号原生插件 `video_tonemap`，纯数学零依赖）**
+**Phase 1 二轮（2026-09-14）：补齐边界 ①②④，并修掉一个让整条链路静默失效的缺陷**
 
-- HDR（PQ / HLG）→ SDR 的色调映射跑在**帧链**上：PQ EOTF 逆（ST 2084）/ HLG OETF+OOTF 逆
-  → 按源峰值归一 → BT.2390 族 Reinhard-extended EETF（软膝 k=0.18）→ gamut 软钳（沿亮度
-  向白点去饱和，防色相偏移）→ sRGB EOTF 逆（piecewise）。
-- `mode=auto`（默认）只在源是 HDR（内核 `video.color` 服务 `is_hdr` + PQ/HLG 传输函数）时
-  挂帧处理器；SDR 源完全不挂链，**不破坏 NV12/GPU 快路径**。`mode=on` 强制（预览/测试），
-  `mode=off` 直通（真实 HDR 显示器想走原生直通时用）。
-- 命令：`tonemap.mode`（auto/on/off）、`tonemap.strength`（0..1 与原画面混合）、
-  `tonemap.peak`（100..10000 nits，默认 1000）、`tonemap.status`。帧链优先级 90
-  （先于 video_quality 的 100，色调映射后再调画质）。
-- **诚实边界**：① "BT.2390 族"是 Reinhard-extended 软膝，不是 BT.2390 报告逐段精确实现；
-  ② 不做 BT.2020→BT.709 基色矩阵（饱和色会偏淡）；③ 帧链像素是 8-bit RGBA（物化路径），
-  PQ 在 8-bit 有量化带隙；④ 显示端是 SDR 还是 HDR 不自动探测（auto 只看源），真实 HDR
-  显示器请 `tonemap.mode off` 走 SDL 直通。
-- **验证**：`tests/unit/test_tonemap.cpp` 12 项像素级单测（PQ 端点/往返/单调、HLG 已知值、
-  EETF 已知值与超界滚降、sRGB 已知值、软钳不变式、端到端已知字节：PQ 100nits→174、
-  HLG 128→140、白点→255、strength 混合与单调）→ 单测总数 103→**115**；E2E 实测
-  `mode=on` 后 17 帧经帧链处理（`seen=17 processed=17`）；selftest 15/15（11 插件/35 命令
-  /热重载无泄漏）；verify 18/18；cli_check 30/30（含 tonemap 接线常驻用例）。
+- **① BT.2390 逐段精确 EETF**（原先只是"BT.2390 族"的 Reinhard-extended 软膝，名不副实）。
+  现按报告实现：`SS = 1.5·maxLum − 0.5`、`TS = 1.5·minLum`，`[TS, SS]` 段 1:1 直通，
+  肩部/趾部各一个 **Hermite 样条**且在切点处**值与一阶导都连续**（无可见折角），
+  再叠加 E3 趾部抬升。归一化沿用参考实现的**内容相对**约定（iw = 内容峰值、
+  ow = 参考白 100 nits）。参考：`natural-harmonia-gropius/mpv-config` 的
+  `shaders/hdr-toys/tone-mapping/bt2390.glsl` 的 `f(x, iw, ib, ow, ob)`。
+- **② BT.2020→BT.709 基色矩阵**（原先缺，BT.2020 饱和色被当显示 RGB 用、整体偏淡）。
+  由两套基色的 RGB→XYZ 推导（非经验拟合），每行和 = 1 ⇒ 中性灰在矩阵下不变
+  （单测钉住这条不变式）。
+- **④ 显示端探测**（原先 auto 只看源）。新增 **`video.display` 服务**，暴露
+  `hdr_capable`（显示器自陈有 HDR 余量）与 `hdr_active`（渲染器**确已**以
+  SRGB_LINEAR 输出）。auto 判据变为 `源是 HDR(PQ/HLG) 且 !hdr_active`，抽成纯函数
+  `wantTonemap()` 并用品真值表穷举单测。
+  - 为什么新开一个服务名而不是给 `PP_VideoColorService` 追加字段：插件按结构体偏移直读
+    字段，"新插件 + 旧宿主"会读到旧宿主静态结构体之外的**函数指针**并调用它 —— 直接崩；
+    而 `get_service` 只返回 `void*`，插件无从判断宿主那份多大。独立服务名让这个组合
+    退化成 `NULL`，一句 `if (!svc)` 就优雅退回。**任何版本组合都不会崩。**
+  - 用 `hdr_active`（做过的事）而不是 `hdr_capable`（说能做）：显示器说支持但渲染器
+    重建失败回退 SDR 时，直通会把 HDR 喂给一条其实是 SDR 的链路。
+- **顺带发现并修复的缺陷（比上面三条都严重）**：`player.cpp` 一直在算
+  `color_primaries` / `color_trc`，但**从未写回 `VideoFrame`**；`app.cpp` 那一侧也从不把
+  它们带进 `YuvColorChoice`。后果是 `video.color` 的 `is_hdr`/`transfer` **恒为"非 HDR"**，
+  于是 `mode=auto` 从来就没激活过、`ensureHdrOutput_()` 从来没被调用过 —— HDR 探测与
+  色调映射的 auto **整条静默失效，不报错、不崩溃**。修复：
+  - `player.cpp` 把 primaries/trc 写回帧；`app.cpp` 带进 `YuvColorChoice`；
+  - 色彩快照抽成**唯一计算点** `updateColorSnapshot_()`：原来它整段在 `if (!useRgba)` 里，
+    只要有插件挂在帧链上（链一挂本帧就物化成 RGBA），快照就再也不更新；
+  - 自检的 `decode_and_display` 循环补 `tickPlugins()`：原先 `app.tick` 在自检里**从不发布**，
+    所有靠 tick 刷状态的插件（`video_tonemap`、`osd_stats`）在门禁里完全不工作 ——
+    "自检全绿"与"功能可用"之间有一道缝，上面这个缺陷就藏在这道缝里。
+- **连带暴露的第二个缺陷：HDR 素材会整段黑屏**。色彩元数据修好之后，HDR10 色彩空间
+  （`0x12002600`）才第一次真正走到 NV12 纹理创建上，而本机 D3D11 **不支持**
+  （`创建纹理失败: Unsupported YUV colorspace`）→ 建纹理失败 → 上传失败 → 帧画不上去。
+  原先它没暴露，正是因为快照只在 NV12 分支更新、而走到建纹理时多半已经切成 RGBA 了。
+  修复：建纹理失败时**降级到内容自己的矩阵+范围**（当作 SDR）重试一次，并**只降一次** ——
+  降级状态记住，否则每帧都要"失败一次再重建一次"，又回到"NV12 纹理每帧销毁重建"的老毛病。
+  实测告警精确出现 1 次，HDR 素材画面正常（`render_and_capture` 内清屏色占比 0.00%）。
+- **性能实测 ⇒ 默认改为 off（重要）**。修好后 auto 真的会挂链，实测（1280x720、PQ 源）：
+  | 模式 | 实测帧率 | 丢帧 |
+  |---|---|---|
+  | `tonemap=auto`（挂链） | **0.4~1.0 fps**（两次实测 0.42 / 1.00） | 144 / 175 |
+  | `tonemap=off` | 30 fps 满帧（自检 `decode_and_display` 90/90、0 丢帧） | 0 |
+  即 CPU 逐像素约 **1~2.4 s/帧**，与实时差 1~2 个数量级。它作为**正确性参考实现**合格
+  （数学由单测逐条钉住），作为默认开启的播放路径不合格 —— 默认 auto 等于让 SDR 屏上的
+  HDR 内容变幻灯片。故**默认 `off`**，`tonemap.mode on` 可显式开启（单帧截图/离线转码/
+  对照验证够用）；auto 的语义、显示端判据、单测真值表都已交付并被自检覆盖，缺的只是
+  让它跑得动的 GPU。**GPU 后端落地后把默认改回 auto。**
+- 命令：`tonemap.mode`（off/auto/on，默认 off）、`tonemap.strength`（0..1 与原画面混合）、
+  `tonemap.peak`（100..10000 nits，默认 1000）、`tonemap.status`（含 `dispService`/
+  `dispCapable`/`dispActive` 三个显示端字段）。帧链优先级 90（先于 video_quality 的 100）。
+- **仍然存在的边界 ③**：帧链像素是 8-bit RGBA（物化路径），PQ 在 8-bit 下有量化带隙 ——
+  映射本身全程 `double`，量化只发生在读入与写回两处；要真正消掉必须走浮点纹理，
+  属于 GPU 后端的事。
+- **验证**：`tests/unit/test_tonemap.cpp` 26 项像素级单测（新增 7 项 `wantTonemap` 真值表，
+  含"旧宿主无 `video.display` 服务时退回只看源"的向后兼容）→ 单测总数 122 → **129**；
+  selftest SDR **15/15**（0 跳过，含 `track_switch`）；HDR 素材在**正常播放路径**经 RPC 实测到
+  `video.display 可用（capable=0, active=0）` → `显示器不支持 HDR：维持 SDR 输出` →
+  `video_tonemap: 已挂帧处理器 (id=1, trc=16 hdr=1 dispActive=0)`，边界 ④ 的判据被观测到。
 
-**Phase 2（计划：换 libplacebo GPU 后端，补齐 Phase 1 的四条边界）**
+**Phase 2 剩余部分（libplacebo GPU 后端）**
 
 - 可行性已核验（2026-09-14）：MSYS2 mingw64 有 `mingw-w64-x86_64-libplacebo` 7.360.1
   （`libplacebo-360.dll` + 全套头文件含 `d3d11.h`/`shaders/colorspace.h`/`gamut_mapping.h`/
@@ -1148,13 +1189,16 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 - 代价：拖运行时依赖 lcms2 / libdovi / shaderc / spirv-cross / vulkan-1（发货约 +6-8 个
   DLL、+15-25 MB），发布载荷口径随之更新。
 - 集成点：D3D11 后端（`libplacebo/d3d11.h`）对接 SDL3 渲染器，把 HDR 纹理交给
-  `pl_renderer` 做 GPU 色调映射（真 BT.2390 / spline / gamut map / dithering），替换
-  Phase 1 的 8-bit CPU 帧链路径。
-- **验证前提（为什么现在不做）**：libplacebo 只有 GPU 后端（Vulkan/D3D11/OpenGL），其
-  dummy 后端只记录命令、不算像素 → 本机（selftest 用 SDL dummy 驱动、无真实 HDR 显示器）
+  `pl_renderer` 做 GPU 色调映射（真 BT.2390 / spline / gamut map / dithering），
+  替换 Phase 1 的 8-bit CPU 帧链路径。**同时消掉边界 ③**（浮点纹理，无 8-bit 量化带隙）
+  和上面的性能问题（0.42 fps → 实时）。
+- **验证前提（为什么还没做）**：libplacebo 只有 GPU 后端（Vulkan/D3D11/OpenGL），其
+  dummy 后端只记录命令、不算像素 → 在**没有真实 HDR/Vulkan 测试环境**的机器上
   **无法对其色调映射输出做像素级断言**，只能证明"能编+不崩"。这与"每条声明配可复现证据"
-  的红线冲突，故 Phase 2 等有真实 HDR/Vulkan 测试环境再落地；Phase 1 先以可验证的方式
-  解决"SDR 屏上 HDR 素材过曝/发灰"的实际问题。
+  的红线冲突，故等有真实 HDR/Vulkan 环境再落地。
+  - 更正一处早先的记述：本机自检走的是**真实的 `windows` 视频驱动**（日志
+    `sdl_init — SDL3 video driver=windows`），不是早先写的"SDL dummy 驱动"；
+    缺的只是**显示器本身没有 HDR 余量**（`video.display` 报 `capable=0`）。
 
 ---
 

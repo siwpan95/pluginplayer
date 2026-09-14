@@ -1256,6 +1256,14 @@ void Player::videoDecodeLoop() {
                 vf->nv12.resize((size_t)nvPitch * h + (size_t)nvPitch * ((h + 1) / 2));
                 vf->colorMatrix = cc.matrix;
                 vf->fullRange = cc.fullRange;
+                /* P2-L2 修复：原色/传输函数**必须**一起带上。原实现只在上面算了
+                 * prId/trcId 用于日志，从未写回帧 —— 于是 app.cpp 那一侧的
+                 * video.color 快照恒为 UNSPECIFIED、is_hdr 恒为 0，HDR→SDR 色调映射
+                 * 的 auto 判据与显示端 HDR 探测**永远不会触发**（整条链路静默失效，
+                 * 不报错、不崩溃，只是 HDR 内容在 SDR 屏上过曝）。
+                 * 由 tests 的 HDR 自检暴露：HDR 素材下 video_tonemap 不挂帧处理器。 */
+                vf->colorPrimaries = prId;
+                vf->colorTrc = trcId;
                 vf->pts = pts;
                 vf->duration = dur;
                 vf->serial = serial;
