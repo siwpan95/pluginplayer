@@ -8,7 +8,7 @@ fetch_deps.py — 准备 vendor/ 依赖（SDL3 + FFmpeg 共享开发包）
 
 用法:
     F:/Python314/python.exe tools/fetch_deps.py
-    ... --src G:/local/player          # 指定本地资源目录（默认会自动探测）
+    ... --src <本地资源目录>            # 指定本地资源目录（默认探测本仓 player/、_extract/、_deps/ 与 PP_SRC_DIRS）
     ... --vendor ./vendor              # 指定输出目录
     ... --no-verify                    # 跳过 SHA-256 校验（不推荐，只在校验误报时用）
     ... --check-update                 # 只查上游有没有更新（HEAD 请求，不下载）
@@ -42,12 +42,14 @@ import ssl
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# 本机常见位置（用户把资源放在这里时可直接复用，不必联网）
-DEFAULT_SRC_DIRS = [
+# 本地资源目录候选（按此顺序探测，先命中者胜）
+# 2026-09-23 去本地化：原写死 G:\local\player（已不存在）→ 改为
+#   ① 环境变量 PP_SRC_DIRS（分号或 os.pathsep 分隔，可放多处）
+#   ② 本仓自带的几个候选目录
+_env_src_dirs = [d for d in os.environ.get("PP_SRC_DIRS", "").split(os.pathsep) if d and os.path.isdir(d)]
+DEFAULT_SRC_DIRS = _env_src_dirs + [
     os.path.join(ROOT, "player"),        # 项目自带的参考/依赖压缩包（.gitignore 已排除）
     os.path.join(ROOT, "_extract"),
-    r"G:\local\player",
-    r"G:\local\player\_extract",
     os.path.join(ROOT, "_deps"),
 ]
 

@@ -4,7 +4,7 @@
 pp_cli.py — PluginPlayer 命令行接口（cmd / PowerShell / bash 通用）
 =================================================================
 
-把 G:\\local\\pluginplayer 变成一个"能在命令提示符里直接使唤"的工具：
+把 PluginPlayer 仓变成一个"能在命令提示符里直接使唤"的工具（路径按本文件位置解析，不写死安装目录）：
 
     pluginplayer open 影片.mp4 --hidden --rpc-port 7911
     pluginplayer status --json
