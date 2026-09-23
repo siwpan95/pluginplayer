@@ -150,7 +150,7 @@ def runtime_env():
 def check_toolchain():
     if not os.path.isfile(GXX):
         print(f"[ERR] 找不到编译器: {GXX}")
-        print("      可用环境变量 PP_GXX 指定，例如 PP_GXX=D:/mingw/bin/g++.exe")
+        print("      可用环境变量 PP_GXX 指定，例如 PP_GXX=<MinGW安装目录>/bin/g++.exe")
         return False
     rc, out = run([GXX, "--version"], quiet=True)
     if rc != 0:
