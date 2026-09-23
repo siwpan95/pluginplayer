@@ -41,17 +41,17 @@
 
 ```bat
 :: 1) 准备依赖（首次；本机已有压缩包时会直接复用）
-F:\Python314\python.exe tools\fetch_deps.py
+python tools\fetch_deps.py
 
 :: 2) 构建（内核 + 11 个原生插件 + 打包 dist/）
-F:\Python314\python.exe build.py
+python build.py
 
 :: 2b) 冒烟测试（编译并运行 tests/ 下两个冒烟程序，几秒钟）
-F:\Python314\python.exe build.py --smoke
+python build.py --smoke
 
 :: 2c) 出发布物（干净重建 + 清理运行期产物 + 生成插件完整性清单）
 ::     实测产物 57 个文件 / 146 MB（不带 --release 时 dist/ 会累积日志与自检证据）
-F:\Python314\python.exe build.py --release
+python build.py --release
 
 :: 3) 播放（把视频拖到 run.bat 上，或：）
 dist\pluginplayer.exe 你的视频.mp4
@@ -94,12 +94,12 @@ cd host-js && npm install && node src\index.mjs --port 7911
 
 ## 命令行接口（CLI）
 
-上面那些命令都要敲 `F:\Python314\python.exe build.py ...` 这种长串。`tools/pp_cli.py`
+上面那些命令都要敲 `python build.py ...` 这种长串。`tools/pp_cli.py`
 把整个项目包成一个 `pluginplayer` 命令，一次装好后在**任意目录**都能用：
 
 ```bat
 :: 装一次（默认装到已在 PATH 上的 <Python>\Scripts，不改任何环境变量）
-F:\Python314\python.exe tools\pp_cli.py install-cli
+python tools\pp_cli.py install-cli
 
 :: 之后
 pluginplayer doctor                         :: 环境体检（真校验：哈希/版本/端口）
@@ -127,7 +127,7 @@ pluginplayer quit
 - 参数边界与 `src/core/main.cpp` 一一对齐，非法值在**起进程之前**就退 2。
 - 命令垫片是**纯 ASCII + CRLF**（cmd.exe 按 GBK 解读 `.bat`），且解释器路径带引号、
   解析顺序为 `PP_PYTHON` → 安装时记录的路径 → `py -3` → `python`。
-- 回归测试：`F:\Python314\python.exe tests\cli_check.py` → 实测 **28/28 通过**。
+- 回归测试：`python tests\cli_check.py` → 实测 **28/28 通过**。
 
 ---
 
@@ -137,7 +137,7 @@ pluginplayer quit
 
 ```bat
 ci.bat                                       :: Windows 一键（门禁 → Python/C++ 单测 → 冒烟 → 自检 → CLI 回归）
-F:\Python314\python.exe tools\ci.py           :: 同上，直接调编排脚本；可 --list / --only / --profile ci
+python tools\ci.py           :: 同上，直接调编排脚本；可 --list / --only / --profile ci
 ```
 
 `tools/ci.py` 把检查拆成**阶段**，每段自己判断前提是否满足：满足就跑，不满足就记 `[SKIP]`
@@ -174,9 +174,9 @@ SDL3/FFmpeg 的 Windows 二进制 + Winsock2。所以：
 散文约束不了它们，所以每条「两处必须相等」的断言都被写成了可执行检查：
 
 ```bat
-F:\Python314\python.exe tools\verify.py              :: 18 条门禁，<1 秒，不需要构建产物
-F:\Python314\python.exe tools\verify.py --list       :: 看有哪些
-F:\Python314\python.exe tools\verify.py --selfcheck  :: 对每条门禁做一次故意破坏，断言它必须报红
+python tools\verify.py              :: 18 条门禁，<1 秒，不需要构建产物
+python tools\verify.py --list       :: 看有哪些
+python tools\verify.py --selfcheck  :: 对每条门禁做一次故意破坏，断言它必须报红
 ```
 
 覆盖：`.bat/.cmd` 的 ASCII + CRLF 契约、插件完整性清单、发布载荷口径、C++ ↔ CLI 的 13 项
@@ -280,7 +280,7 @@ Copyright (C) 2026 siwpan
 | FFmpeg | 9.0.1 `full_build-shared`（gyan.dev，GCC 16.1.0 构建） | 下载 | demux / 解码 / 重采样 / 缩放 |
 | SDL3 | 3.4.16（devel-mingw + win32-x64 运行时） | 本地压缩包 | 窗口 / 渲染 / 音频 / 动态加载 |
 | Cordis | 4.0.0-rc.9 + `@cordisjs/plugin-loader` 1.0.0-rc.6 | npm | 进程外 JS 插件框架 |
-| 编译器 | MinGW-w64 GCC 16.1.0（`F:\mingw64\mingw64\bin\g++.exe`） | 本机 | 构建 |
+| 编译器 | MinGW-w64 GCC 16.1.0（`<PATH>`） | 本机 | 构建 |
 | 参考源码 | `potplayer-master`（playerdemo） | 本地压缩包 | 内核架构参考 |
 
 > 选 gyan.dev 的 `full_build-shared` 是因为它同时提供
@@ -634,14 +634,14 @@ pluginplayer/
 需要 `dist/` 或运行中播放器的用例在前提缺失时记 `SKIP` 且**不计入通过数**
 （跳过 ≠ 通过，与 `--selftest` 的口径一致）。
 
-经命令垫片从**别的目录**调用也实测过（工作目录 `C:\Windows`）：
+经命令垫片从**别的目录**调用也实测过（工作目录 `<PATH>`）：
 
 ```
 pluginplayer.cmd --version    rc=0   pluginplayer-cli 1.0.0
 pluginplayer.cmd status       rc=0   媒体   : test_assets/sample.mp4
 pluginplayer.cmd seek +1      rc=0   [OK] 位置 -> 0:07.90
 pluginplayer.cmd commands     rc=0   effect.clear ... <plugin#5>
-pluginplayer.cmd doctor       rc=0   [OK] Python 3.14.7 @ F:\Python314\python.exe
+pluginplayer.cmd doctor       rc=0   [OK] Python 3.14.7 @ python
 pp.cmd status                 rc=0   完整状态表（音量 0.800）
 ```
 
@@ -705,8 +705,8 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 ### 12. 单元测试与 CI —— 89 + 108 项通过，本地 CI 9/9 阶段
 
 ```bat
-F:\Python314\python.exe build.py --unit                        :: C++ 单元测试
-F:\Python314\python.exe -m unittest discover -s tests\python   :: Python 单元测试
+python build.py --unit                        :: C++ 单元测试
+python -m unittest discover -s tests\python   :: Python 单元测试
 ci.bat                                                          :: 一键跑全部
 ```
 
@@ -724,7 +724,7 @@ OK                                                          ← tests/python/（
 | 套件 | 项 | 覆盖 |
 |---|---|---|
 | `string` | 10 | trim/lower/endsWith（大小写不敏感是刻意的）/split 保留空段/fmtTime/fmtBytes/pathJoin |
-| `path` | 11 | 白名单包含判定：前缀欺骗、`..` 穿越、大小写、UNC、`scheme://` 与盘符 `C://` 的区分 |
+| `path` | 11 | 白名单包含判定：前缀欺骗、`..` 穿越、大小写、UNC、`scheme://` 与盘符 `<PATH>` 的区分 |
 | `json` | 12 | 严格 JSON：重复键、未闭合、尾随垃圾、01 前导零、深嵌套上限、转义往返、**键名出现在值里不误命中**、数组元素类型、键注入 |
 | `hash`/`png` | 7 | SHA-256 已知向量；PNG 独立重解析（签名/IHDR/**逐块 CRC32**/IDAT 解回像素逐字节比对/Adler32） |
 | `capture` | 8 | 抓屏取证（`render_and_capture` 的判据）：子区域统计、**pitch 带行填充**（防止按 `w*4` 走）、矩形裁剪、alpha 不参与比较、纯黑必须算 0 而非法参数必须算 −1 |
@@ -772,7 +772,7 @@ chcp                                :: → Active code page: 65001（修复前�
 ```
 
 ```text
-> pluginplayer.exe --selftest --frames 30 --out selftest_out "G:\...\願廣西平安.mp4"
+> pluginplayer.exe --selftest --frames 30 --out selftest_out "<PATH>"
 修复前：rc=2   avformat_open_input 失败: ... (Invalid argument)
 修复后：rc=0   [PASS] open_media — 480x852 29.97 fps dur=78.46 s codec=h264/aac
 ```
