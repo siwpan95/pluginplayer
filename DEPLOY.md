@@ -78,7 +78,7 @@ F:\Python314\python.exe build.py --release
 ### 无人值守部署
 
 ```bat
-dist\pluginplayer.exe --hidden --rpc-port 7911 --size 1280x720 D:\media\loop.mp4
+dist\pluginplayer.exe --hidden --rpc-port 7911 --size 1280x720 <媒体文件>
 ```
 
 配合 `pluginplayer` 命令远程控制（见 [docs/CLI.md](docs/CLI.md)）。

@@ -327,7 +327,7 @@ CLI 侧只在自己有而 C++ 没有时才用裸字面量（`--start`、`speed`�
 
 | 现象 | 原因 | 修法 |
 |---|---|---|
-| `找不到编译器` | 本机路径不同 | `set PP_GXX=D:\mingw\bin\g++.exe` |
+| `找不到编译器` | 本机路径不同 | `set PP_GXX=<MinGW安装目录>\bin\g++.exe` |
 | `缺少依赖目录 vendor/...` | 没跑 `fetch_deps.py`，或归档不在候选目录 | 跑 `tools/fetch_deps.py --src <含归档的目录>` |
 | 运行产物报 `0xC0000135` | 找不到 DLL（`build/*.exe` 与 `dist/` 不同目录） | 用 `build.py` 跑（它补了 PATH），或把 `dist/` 加进 PATH |
 | `doctor` 报「控制通道令牌不存在」 | 播放器没启动过 | 正常，`WARN` 不阻塞 |

@@ -80,7 +80,7 @@ PP_PLUGIN_DECL(&g_plugin)   /* 导出 pp_plugin_query / pp_plugin_abi_version */
 ### 2. 编译
 
 ```bat
-cd G:\local\pluginplayer
+cd <PATH>
 F:\mingw64\mingw64\bin\g++.exe -std=c++17 -O2 -shared ^
   -Isrc\sdk ^
   examples\hello_plugin\plugin.cpp -o dist\plugins\hello_plugin.dll ^
