@@ -254,8 +254,7 @@ def main():
         need = []
         for d in missing:
             if d in EXCLUDE_RUNTIME:
-                print(f"      [跳过运行时库] {d}（本脚本不抓；如需 vendor 自包含，
-                       跑 python tools/fetch_deps.py --libass-only 补齐）")
+                print(f"      [跳过运行时库] {d}（本脚本不抓；要 vendor 自包含请跑 python tools/fetch_deps.py --libass-only）")
                 continue
             pkg = files_map.get(d)
             if not pkg:
