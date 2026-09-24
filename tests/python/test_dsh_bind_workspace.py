@@ -28,7 +28,7 @@ def snapshot():
         "global": {"initialized": True, "workspaceIds": ["aaaa"], "archivedSessionIds": []},
         "tables": {"workspaces": {
             "aaaa": {
-                "path": "G:\\docs", "title": "docs", "sessionIds": [],
+                "path": "G:\\allin\\docs", "title": "docs", "sessionIds": [],
                 "createdAt": "2026-08-28T03:41:19.775Z",
                 "updatedAt": "2026-08-28T17:13:06.743Z",
             },
