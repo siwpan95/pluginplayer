@@ -33,8 +33,8 @@ $DSH_HOME 解析：环境变量 DSH_HOME，否则 `~/.dsh`（与 dsh 自身规�
 
 用法::
 
-    F:\\Python314\\python.exe tools\\dsh_bind_workspace.py                 # 绑定本仓库根目录
-    F:\\Python314\\python.exe tools\\dsh_bind_workspace.py "D:\\somewhere"  # 绑定指定目录
+    python tools\\dsh_bind_workspace.py                    # 绑定本仓库根目录
+    python tools\\dsh_bind_workspace.py "<目标目录>"        # 绑定指定目录
 
     --api-port PORT   探测/调用的端口（默认 3080；0 = 跳过 API 通道）
     --dsh-home DIR    覆盖 $DSH_HOME（测试用）
