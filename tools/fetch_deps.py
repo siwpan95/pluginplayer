@@ -43,7 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 # 本地资源目录候选（按此顺序探测，先命中者胜）
-# 2026-09-23 去本地化：原写死 G:\local\player（已不存在）→ 改为
+# 2026-09-23 去本地化：原写死原路径）→ 改为
 #   ① 环境变量 PP_SRC_DIRS（分号或 os.pathsep 分隔，可放多处）
 #   ② 本仓自带的几个候选目录
 _env_src_dirs = [d for d in os.environ.get("PP_SRC_DIRS", "").split(os.pathsep) if d and os.path.isdir(d)]
