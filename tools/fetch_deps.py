@@ -315,6 +315,99 @@ def check_update(src_dirs, cache):
     return 0
 
 
+# ── libass 运行时闭包（P1-e 字幕插件用）────────────────────────────────────
+# vendor/libass/ 是**链接期**依赖（include/lib + 部分 DLL）；libass-9.dll 的传递依赖
+# （libharfbuzz / libglib / libfontconfig …）还需要 MinGW 运行时三件套。缺这三件时，
+# 构建前的加载体检会报 err=126（"找不到指定的模块"）——而运行时其实由 dist/ 提供完整闭包
+# （见 build.py：「运行时由 Windows 加载器从 dist/ 解析 libass-9.dll 及其闭包」）。
+# 为让**构建前**也能自检，组装 vendor 时把缺的运行时 DLL 一并补齐（幂等：只补缺，不删不改）。
+MINGW_RUNTIME_DLLS = ("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll")
+
+
+def _mingw_bin_candidates(root):
+    """运行时三件套的候选来源目录（按优先级去重）。"""
+    cands = []
+    for var in ("PP_LIBASS_RUNTIME_SRC", "PP_MINGW_BIN"):
+        v = os.environ.get(var, "").strip()
+        if v:
+            cands.append(v)
+    gxx = os.environ.get("PP_GXX", r"F:/mingw64/mingw64/bin/g++.exe").strip()
+    if gxx:
+        cands.append(os.path.dirname(gxx))
+    cands.append(r"F:/mingw64/mingw64/bin")           # build.py 的默认 MinGW 工具链
+    cands.append(os.path.join(root, "dist"))         # 构建产物：含完整运行时闭包
+    seen, out = set(), []
+    for c in cands:
+        c = os.path.normpath(c)
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _verify_libass_loadable(bin_dir, quiet=False):
+    """在子进程里做一次真实加载体检：add_dll_directory + CDLL + ass_library_init。"""
+    dll = os.path.join(bin_dir, "libass-9.dll")
+    if not os.path.isfile(dll):
+        if not quiet:
+            print("    [libass] 目录里没有 libass-9.dll，跳过加载体检")
+        return True
+    code = (
+        "import ctypes, os, sys\n"
+        "p = sys.argv[1]\n"
+        "os.add_dll_directory(p)\n"
+        "lib = ctypes.CDLL(os.path.join(p, 'libass-9.dll'))\n"
+        "f = lib.ass_library_init; f.restype = ctypes.c_void_p; f.argtypes = []\n"
+        "print('OK' if f() else 'NULL')\n"
+    )
+    try:
+        r = subprocess.run([sys.executable, "-c", code, bin_dir],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"    [WARN] libass 加载体检没跑起来：{type(e).__name__}: {e}")
+        return False
+    out = r.stdout.decode("utf-8", "replace").strip()
+    if r.returncode == 0 and out.endswith("OK"):
+        if not quiet:
+            print("    [libass] 加载体检通过（ass_library_init 返回非空）")
+        return True
+    print(f"    [WARN] libass 加载体检未通过（exit={r.returncode}）：{out[-200:]}")
+    return False
+
+
+def assemble_libass_runtime(vendor, root=None, quiet=False):
+    """把 libass 运行时闭包补进 vendor/libass/bin（幂等；只补缺，不删不改）。
+
+    返回 True = 已完整或已补齐并通过体检；False = 缺件且找不到来源，或体检未过。
+    """
+    root = root or ROOT
+    target = os.path.join(vendor, "libass", "bin")
+    if not os.path.isdir(target):
+        if not quiet:
+            print("    [libass] vendor/libass/bin 不存在（本仓未 vendor libass），跳过")
+        return True
+    missing = [d for d in MINGW_RUNTIME_DLLS if not os.path.isfile(os.path.join(target, d))]
+    if not missing:
+        if not quiet:
+            print("    [libass] 运行时闭包已完整，无需补齐")
+        return _verify_libass_loadable(target, quiet=quiet)
+    src_dir = None
+    for c in _mingw_bin_candidates(root):
+        if all(os.path.isfile(os.path.join(c, d)) for d in missing):
+            src_dir = c
+            break
+    if not src_dir:
+        print(f"    [WARN] libass 缺运行时闭包 {', '.join(missing)}，但没找到来源目录。")
+        print("           可设 PP_LIBASS_RUNTIME_SRC=<含这些 DLL 的目录>，"
+              "或把 MinGW 工具链放到 PP_GXX 默认位置。")
+        return False
+    for d in missing:
+        shutil.copy2(os.path.join(src_dir, d), os.path.join(target, d))
+    if not quiet:
+        print(f"    [libass] 已从 {src_dir} 补齐运行时闭包 {len(missing)} 个 DLL："
+              f"{', '.join(missing)}")
+    return _verify_libass_loadable(target, quiet=quiet)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", action="append", default=[])
@@ -324,12 +417,19 @@ def main():
                     help="跳过 SHA-256 校验与条目检查（不推荐）")
     ap.add_argument("--refresh", action="store_true",
                     help="忽略本机已有档案与缓存，强制重新下载（用于升级依赖版本）")
+    ap.add_argument("--libass-only", action="store_true",
+                    help="只补齐 libass 运行时闭包并做加载体检（不下载/解压 SDL3、FFmpeg）")
+    ap.add_argument("--skip-libass", action="store_true",
+                    help="跳过 libass 运行时闭包补齐")
     ap.add_argument("--check-update", action="store_true",
                     help="只查上游是否已更新（HEAD 请求，不下载）")
     args = ap.parse_args()
 
     if args.check_update:
         return check_update(args.src + DEFAULT_SRC_DIRS, args.tmp)
+
+    if args.libass_only:
+        return 0 if assemble_libass_runtime(args.vendor) else 1
 
     src_dirs = args.src + DEFAULT_SRC_DIRS
     sevenz = find_7z()
@@ -465,9 +565,16 @@ def main():
              glob.glob(os.path.join(ff_root, "bin", "*.exe")):
         shutil.copy2(f, os.path.join(vendor, "ffmpeg", "bin"))
 
+    if not args.skip_libass:
+        print("\n[4/4] 补齐 libass 运行时闭包（构建前体检用）…")
+        if not assemble_libass_runtime(vendor):
+            print("    [WARN] libass 运行时闭包不完整——运行时会从 dist/ 解析（构建后无碍），"
+                  "但构建前自检会失败。")
+
     print("\n[OK] vendor/ 已就绪：")
     for sub in ("sdl3/include", "sdl3/lib", "sdl3/bin",
-                "ffmpeg/include", "ffmpeg/lib", "ffmpeg/bin"):
+                "ffmpeg/include", "ffmpeg/lib", "ffmpeg/bin",
+                "libass/bin"):
         p = os.path.join(vendor, *sub.split("/"))
         n = len(os.listdir(p)) if os.path.isdir(p) else 0
         print(f"     vendor/{sub}: {n} 项")
