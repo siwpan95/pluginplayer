@@ -11,7 +11,9 @@ iconv / libpng / unibreak / zlib …）。本脚本做**依赖闭包固定点抓
   2. 用 mingw-w64-x86_64.files 建立「DLL 基名 -> 所属 MSYS2 包」映射。
   3. 从 libass-9.dll 出发，用 pe_deps 反复扫描 PE 导入闭包；
      每轮把缺失的 MinGW DLL 映射到包、下载解包、把 bin/*.dll 并进 vendor/libass/bin；
-     直到闭包闭合（libgcc_s_seh-1 等 MinGW 运行时库由 build.py 随 dist 发，排除）。
+     直到闭包闭合。**MinGW 运行时三件套（libgcc_s_seh-1 / libstdc++-6 / libwinpthread-1）不由本脚本抓取**，
+  而是由 `tools/fetch_deps.py --libass-only` 从本机来源（PP_LIBASS_RUNTIME_SRC → PP_GXX 目录 →
+  F:/mingw64/mingw64/bin → 本仓 dist/）补齐——两者配合后 vendor/libass/bin 才是完整可加载集（build.py 亦如此声明）。
 
 全程纯 Python（zstandard + tarfile），不依赖 7z / tar / pacman。供应链防护同 fetch_deps：
 HTTPS + 证书校验、围栏检查（无绝对路径 / 无 ..）、基础四包 SHA-256 钉死（TOFU）、
@@ -46,7 +48,9 @@ BASE_PACKAGES = [
     "mingw-w64-x86_64-harfbuzz",
 ]
 
-# build.py 已随 dist/ 发布的 MinGW 运行时库（libass 链了它们，但不必由本脚本管）
+# MinGW 运行时三件套：本脚本**刻意不抓**（它们由 MinGW 工具链提供、随 dist 发布），
+# 由 tools/fetch_deps.py --libass-only 从本机来源补齐（离线可用、幂等）。
+# 见 README 快速开始 1b) 与 build.py 的「bin/ 下即完整可加载集」声明。
 EXCLUDE_RUNTIME = {
     "libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll",
 }
@@ -250,7 +254,8 @@ def main():
         need = []
         for d in missing:
             if d in EXCLUDE_RUNTIME:
-                print(f"      [跳过运行时库] {d}（build.py 随 dist 发）")
+                print(f"      [跳过运行时库] {d}（本脚本不抓；如需 vendor 自包含，
+                       跑 python tools/fetch_deps.py --libass-only 补齐）")
                 continue
             pkg = files_map.get(d)
             if not pkg:
