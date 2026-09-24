@@ -11,16 +11,20 @@ iconv / libpng / unibreak / zlib …）。本脚本做**依赖闭包固定点抓
   2. 用 mingw-w64-x86_64.files 建立「DLL 基名 -> 所属 MSYS2 包」映射。
   3. 从 libass-9.dll 出发，用 pe_deps 反复扫描 PE 导入闭包；
      每轮把缺失的 MinGW DLL 映射到包、下载解包、把 bin/*.dll 并进 vendor/libass/bin；
-     直到闭包闭合。**MinGW 运行时三件套（libgcc_s_seh-1 / libstdc++-6 / libwinpthread-1）不由本脚本抓取**，
-  而是由 `tools/fetch_deps.py --libass-only` 从本机来源（PP_LIBASS_RUNTIME_SRC → PP_GXX 目录 →
-  F:/mingw64/mingw64/bin → 本仓 dist/）补齐——两者配合后 vendor/libass/bin 才是完整可加载集（build.py 亦如此声明）。
+     直到闭包闭合。**MinGW 运行时三件套（libgcc_s_seh-1 / libstdc++-6 / libwinpthread-1）
+     默认也由本脚本从上游抓**（gcc-libs 提供前两个、libwinpthread 提供第三个），
+     这样 vendor/libass/bin 在**尚未构建**（还没有 dist/）时也是完整可加载集（build.py 亦如此声明）。
+     `--skip-runtime` 可退回旧行为（三件套留给 `tools/fetch_deps.py --libass-only` 从本机
+     来源 PP_LIBASS_RUNTIME_SRC → PP_GXX 目录 → F:/mingw64/mingw64/bin → 本仓 dist/ 补齐，
+     离线可用、幂等）。
 
 全程纯 Python（zstandard + tarfile），不依赖 7z / tar / pacman。供应链防护同 fetch_deps：
-HTTPS + 证书校验、围栏检查（无绝对路径 / 无 ..）、基础四包 SHA-256 钉死（TOFU）、
-其余包打印实测哈希供后续钉死。
+HTTPS + 证书校验、围栏检查（无绝对路径 / 无 ..）、基础四包与运行时包 SHA-256 钉死、
+其余包 TOFU（首次记录实测哈希后强制比对）。
 
 用法:
     F:/Python314/python.exe tools/fetch_libass.py
+    F:/Python314/python.exe tools/fetch_libass.py --skip-runtime   # 三件套交由 fetch_deps 补
 """
 import os
 import sys
@@ -48,16 +52,20 @@ BASE_PACKAGES = [
     "mingw-w64-x86_64-harfbuzz",
 ]
 
-# MinGW 运行时三件套：本脚本**刻意不抓**（它们由 MinGW 工具链提供、随 dist 发布），
-# 由 tools/fetch_deps.py --libass-only 从本机来源补齐（离线可用、幂等）。
-# 见 README 快速开始 1b) 与 build.py 的「bin/ 下即完整可加载集」声明。
-EXCLUDE_RUNTIME = {
+# MinGW 运行时三件套：**默认随闭包一起从上游抓**（2026-09-23 调整，原先刻意不抓）。
+#   libgcc_s_seh-1.dll  ← mingw-w64-x86_64-gcc-libs
+#   libstdc++-6.dll     ← mingw-w64-x86_64-gcc-libs
+#   libwinpthread-1.dll ← mingw-w64-x86_64-libwinpthread
+# 传 --skip-runtime 则退回旧行为：本脚本不抓，交给 tools/fetch_deps.py --libass-only
+# 从本机来源补齐（见 README 快速开始 1b) 与 build.py 的「bin/ 下即完整可加载集」声明）。
+RUNTIME_DLLS = {
     "libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll",
 }
 
 CTX = ssl.create_default_context()
 
-# 基础四包的 SHA-256（TOFU）
+# 基础四包 + 运行时两包（gcc-libs / libwinpthread）的 SHA-256 钉死。
+# 其余传递依赖走 TOFU（sha256_tofu.json，首次记录后强制比对）。
 DOWNLOADS_SHA256 = {
     "mingw-w64-x86_64-libass-0.17.5-1-any.pkg.tar.zst":
         "11966a8df12b99454ac552c587f58c4ea81bb040bad1cfdd219bf2f50f567f8d",
@@ -67,6 +75,11 @@ DOWNLOADS_SHA256 = {
         "82d4f9e431082d2ac2fa7b9eddd73aa0c073bf8ae66b7d137195797ec543dffa",
     "mingw-w64-x86_64-harfbuzz-14.4.0-1-any.pkg.tar.zst":
         "7343f6aae536e8b0604395a26ecb2666b7bab4936163bdec61e38139169afea0",
+    # MinGW 运行时（2026-09-23 实测钉死；版本号一变即文件名变，钉死项自动失效并回落到 TOFU）
+    "mingw-w64-x86_64-gcc-libs-16.2.0-3-any.pkg.tar.zst":          # -> libgcc_s_seh-1 / libstdc++-6
+        "f8e25ea67bb796e7f65550f0dca9fce4cdde8aaa3dadafe4d13c6a8233c8de26",
+    "mingw-w64-x86_64-libwinpthread-14.0.0.r375.g9c1abbbf5-1-any.pkg.tar.zst":  # -> libwinpthread-1
+        "1d0ed7fda332a5c879de210f3d72c75fa1f3df7cc63dd951e763dec8eb02c1ee",
 }
 
 
@@ -182,6 +195,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vendor", default=os.path.join(ROOT, "vendor", "libass"))
     ap.add_argument("--tmp", default=os.path.join(ROOT, "_deps", "libass"))
+    ap.add_argument("--skip-runtime", action="store_true",
+                    help="不抓 MinGW 运行时三件套（默认抓；旧行为=由 fetch_deps --libass-only 从本机补）")
     args = ap.parse_args()
     os.makedirs(args.tmp, exist_ok=True)
     out = args.vendor
@@ -253,8 +268,8 @@ def main():
         provided, missing = pe_deps.closure(libass_dll, [out_bin(out)])
         need = []
         for d in missing:
-            if d in EXCLUDE_RUNTIME:
-                print(f"      [跳过运行时库] {d}（本脚本不抓；要 vendor 自包含请跑 python tools/fetch_deps.py --libass-only）")
+            if d in RUNTIME_DLLS and args.skip_runtime:
+                print(f"      [跳过运行时库] {d}（--skip-runtime；要 vendor 自包含请跑 python tools/fetch_deps.py --libass-only）")
                 continue
             pkg = files_map.get(d)
             if not pkg:
@@ -275,6 +290,10 @@ def main():
             if not (os.path.isfile(arch) and os.path.getsize(arch) > 1024):
                 download(PKG_BASE + fn, arch)
             h = sha256_of(arch)
+            want = DOWNLOADS_SHA256.get(fn)
+            if want is not None and h != want:
+                print(f"      [ERR] {fn} SHA-256 不匹配（钉死 {want[:16]} 实测 {h[:16]}）")
+                return 1
             if fn in tofu:
                 if h != tofu[fn]:
                     print(f"      [ERR] {fn} TOFU 失败：首次 {tofu[fn][:16]} 实测 {h[:16]}")
@@ -294,11 +313,18 @@ def main():
     print("\n[4/5] 最终闭包校验…")
     _sync_bin(args.tmp, out)
     provided, missing = pe_deps.closure(libass_dll, [out_bin(out)])
-    missing = [m for m in missing if m not in EXCLUDE_RUNTIME]
+    if args.skip_runtime:
+        skipped_runtime = sorted(m for m in missing if m in RUNTIME_DLLS)
+        missing = [m for m in missing if m not in RUNTIME_DLLS]
+    else:
+        skipped_runtime = []
     if missing:
         print(f"[ERR] 仍有缺失: {missing}")
         return 1
     print(f"[OK] libass-9.dll 依赖闭包完整（需随 dist 发布 {len(provided)} 个 DLL）")
+    if skipped_runtime:
+        print(f"      [注意] --skip-runtime：{len(skipped_runtime)} 个运行时库仍需由 dist/ 或 "
+              f"fetch_deps.py --libass-only 提供: {skipped_runtime}")
     for p in sorted(provided):
         print(f"      {p}")
 

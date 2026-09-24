@@ -43,7 +43,12 @@
 :: 1) 准备依赖（首次；本机已有压缩包时会直接复用）
 python tools\fetch_deps.py
 
-:: 1b) 可选：只补齐 libass 运行时闭包并做加载体检（不下载、不构建，秒级）
+:: 1b) 备选：从上游 MSYS2 抓 libass 完整依赖闭包（含 MinGW 运行时三件套）
+::     固定点抓取 + SHA-256 钉死（基础包/运行时包）/ TOFU（其余传递依赖），产物即完整可加载集。
+::     不联机时跳过本步即可——上面的 fetch_deps.py 会从本机工具链与 dist 取齐三件套。
+python tools\fetch_libass.py
+
+:: 1c) 可选：只补齐 libass 运行时闭包并做加载体检（不下载、不构建，秒级）
 ::     vendor/libass/bin 缺 MinGW 运行时三件套时，构建前的 libass 自检会报 err=126；
 ::     本步会从 PP_LIBASS_RUNTIME_SRC / PP_GXX 所在目录 / F:\mingw64\mingw64\bin / 本仓 dist 取齐缺件。
 python tools\fetch_deps.py --libass-only
