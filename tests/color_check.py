@@ -15,7 +15,7 @@
 所以这项检查不只验"值对不对"，还验"标注确实被读进去了"。
 
 用法:
-    F:\\Python314\\python.exe tests\\color_check.py [--keep]
+    python tests/color_check.py [--keep]
 退出码：0 = 全通过（或全部 SKIP），1 = 有失败。跳过**不计入**通过数。
 """
 import argparse

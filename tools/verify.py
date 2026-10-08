@@ -26,8 +26,8 @@ verify.py — 仓库机械门禁（mechanical gates）
 **跳过不等于通过**，统计口径与 `tests/cli_check.py`、`--selftest` 一致。
 
 用法:
-    F:\\Python314\\python.exe tools\\verify.py              # 跑全部门禁
-    F:\\Python314\\python.exe tools\\verify.py --list        # 列出门禁
+    python tools/verify.py              # 跑全部门禁
+    python tools/verify.py --list        # 列出门禁
     ... --only bat-ascii-crlf,doc-links                      # 只跑指定门禁
     ... --json                                               # 机器可读
     ... --verbose                                            # 打印每条检查的依据

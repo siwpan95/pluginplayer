@@ -41,8 +41,8 @@ pp_cli.py — PluginPlayer 命令行接口（cmd / PowerShell / bash 通用）
 
 用法速查
 --------
-    F:\\Python314\\python.exe tools\\pp_cli.py doctor
-    F:\\Python314\\python.exe tools\\pp_cli.py install-cli     # 之后可直接用 pluginplayer
+    python tools/pp_cli.py doctor
+    python tools/pp_cli.py install-cli     # 之后可直接用 pluginplayer
 """
 
 import hashlib

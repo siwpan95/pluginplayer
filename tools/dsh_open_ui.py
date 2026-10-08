@@ -14,8 +14,8 @@ dsh_open_ui.py — dsh Web UI 就绪后，用系统默认浏览器打开它
 
 用法::
 
-    F:\\Python314\\pythonw.exe tools\\dsh_open_ui.py            # 无窗口后台（bat 里就用这个）
-    F:\\Python314\\python.exe   tools\\dsh_open_ui.py --port 3080 --timeout 120
+    pythonw tools/dsh_open_ui.py            # 无窗口后台（bat 里就用这个）
+    python  tools/dsh_open_ui.py --port 3080 --timeout 120
 """
 
 import argparse

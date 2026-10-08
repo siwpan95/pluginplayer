@@ -7,7 +7,7 @@ cli_check.py — PluginPlayer 命令行接口（tools/pp_cli.py）回归测试
 项目里没有单元测试框架，这个脚本刻意做成"直接跑、看退出码"的形式，
 与 build.py --smoke / selftest.bat 的风格一致：
 
-    F:\\Python314\\python.exe tests\\cli_check.py
+    python tests/cli_check.py
 
 覆盖两类东西：
   A. 静态契约 —— 命令垫片必须是纯 ASCII + CRLF（cmd.exe 按 GBK 解读 .bat，
