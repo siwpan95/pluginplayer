@@ -986,7 +986,7 @@ def candidate_shim_dirs():
     """候选安装目录，按"已在本机 PATH 上"优先。
 
     首选 <python 前缀>\\Scripts —— Python 自己的用户级脚本目录，通常已在 PATH
-    （本机 F:\\Python314\\Scripts 就在），因此默认不需要改任何环境变量。
+    （本机 Python 安装目录下的 `Scripts` 通常就在），因此默认不需要改任何环境变量。
     """
     cands = []
     env = os.environ.get("PP_BIN_DIR", "").strip()

@@ -4,7 +4,7 @@ rem Windows-only stages need Windows; on Linux use: python3 tools/ci.py --profil
 rem Stages whose prerequisites are missing are SKIPPED with a reason (skip != pass).
 setlocal
 cd /d %~dp0
-set "PP_PY=F:\Python314\python.exe"
+set "PP_PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PP_PY%" set "PP_PY="
 rem Do NOT use `if not defined X where py && set ...`: in cmd the && ends
 rem the if scope (if guards only the first command), so set runs always.

@@ -6,7 +6,7 @@ set "PP_ROOT=%~dp0"
 set "PP_EXE=%PP_ROOT%dist\pluginplayer.exe"
 if not exist "%PP_EXE%" (
   echo [ERR] not found: %PP_EXE%
-  echo       build it first: F:\Python314\python.exe build.py
+  echo       build it first: python build.py
   pause
   exit /b 1
 )

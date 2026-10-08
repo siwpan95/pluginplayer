@@ -496,7 +496,7 @@ def make_launcher():
                 'set "PP_EXE=%PP_ROOT%dist\\pluginplayer.exe"\r\n'
                 'if not exist "%PP_EXE%" (\r\n'
                 "  echo [ERR] not found: %PP_EXE%\r\n"
-                "  echo       build it first: F:\\Python314\\python.exe build.py\r\n"
+                "  echo       build it first: python build.py\r\n"
                 "  pause\r\n"
                 "  exit /b 1\r\n"
                 ")\r\n"
@@ -571,7 +571,7 @@ def make_launcher():
                 "rem Stages whose prerequisites are missing are SKIPPED with a reason (skip != pass).\r\n"
                 "setlocal\r\n"
                 "cd /d %~dp0\r\n"
-                "set \"PP_PY=F:\\Python314\\python.exe\"\r\n"
+                "set \"PP_PY=%~dp0.venv\\Scripts\\python.exe\"\r\n"
                 "if not exist \"%PP_PY%\" set \"PP_PY=\"\r\n"
                 "rem Do NOT use `if not defined X where py && set ...`: in cmd the && ends\r\n"
                 "rem the if scope (if guards only the first command), so set runs always.\r\n"
