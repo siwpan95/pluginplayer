@@ -6,9 +6,9 @@ if not exist vendor\ffmpeg\bin\ffmpeg.exe (
   echo [ERR] vendor\ffmpeg\bin\ffmpeg.exe is missing. Run tools\fetch_deps.py first.
   pause & exit /b 1
 )
-F:\Python314\python.exe build.py || pause
+python build.py || pause
 echo [1/3] smoke tests (tests/smoke_link.cpp + tests/smoke_audio.cpp)
-F:\Python314\python.exe build.py --smoke
+python build.py --smoke
 if errorlevel 1 echo [WARN] smoke test had failures, see output above
 cd dist
 if not exist test_assets mkdir test_assets

@@ -23,8 +23,8 @@ HTTPS + 证书校验、围栏检查（无绝对路径 / 无 ..）、基础四包
 其余包 TOFU（首次记录实测哈希后强制比对）。
 
 用法:
-    F:/Python314/python.exe tools/fetch_libass.py
-    F:/Python314/python.exe tools/fetch_libass.py --skip-runtime   # 三件套交由 fetch_deps 补
+    python tools/fetch_libass.py
+    python tools/fetch_libass.py --skip-runtime   # 三件套交由 fetch_deps 补
 """
 import os
 import sys

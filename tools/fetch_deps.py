@@ -7,7 +7,7 @@ fetch_deps.py — 准备 vendor/ 依赖（SDL3 + FFmpeg 共享开发包）
 优先使用本机已有的压缩包，其次联网下载。
 
 用法:
-    F:/Python314/python.exe tools/fetch_deps.py
+    python tools/fetch_deps.py
     ... --src <本地资源目录>            # 指定本地资源目录（默认探测本仓 player/、_extract/、_deps/ 与 PP_SRC_DIRS）
     ... --vendor ./vendor              # 指定输出目录
     ... --no-verify                    # 跳过 SHA-256 校验（不推荐，只在校验误报时用）

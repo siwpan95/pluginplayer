@@ -7,7 +7,7 @@ pe_deps.py — 纯 Python 解析 PE 导入表，枚举 DLL 传递依赖闭包。
 DLL 一起进 dist/。不依赖 objdump / dumpbin / ldd。
 
 用法:
-    F:/Python314/python.exe tools/pe_deps.py <dll> [额外的搜索目录...]
+    python tools/pe_deps.py <dll> [额外的搜索目录...]
 """
 import os
 import sys

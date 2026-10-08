@@ -1,7 +1,7 @@
 # PluginPlayer 播放体验增强规划（v1 草案）
 
 > 状态：**P0 全部闭环（B1–B5，2026-09-12）；P1/P2 未开始**
-> 基线：`G:\local\pluginplayer` @ `af6bacc`（工作树含未提交产物目录 `_dist_baseline_backup` / `_vendor_backup_20260912`）
+> 基线：`G:\local\pluginplayer`（**该 checkout 现已迁至 `G:\repos\pluginplayer`**）@ `af6bacc`（工作树含未提交产物目录 `_dist_baseline_backup` / `_vendor_backup_20260912`）
 > 诊断日期：2026-09-12
 > 关联约束：[AGENTS.md](AGENTS.md)（仓库规则与验证门槛）、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 > 实施进度与实测数字：[README.md 「验证结果」§14–§19](README.md)（本文件保留**规划与决策过程**，逐批记录含"当时判断错了什么"）
@@ -44,7 +44,7 @@ mov,mp4,m4a,3gp,3g2,mj2  852x480  24.00 fps  dur=104.87 s  h264/aac  471 kbps  1
 ```powershell
 # 注意：必须用「调用运算符」传参。Start-Process -ArgumentList 会把中文路径
 # 按 ANSI 转换而破坏它（实测 open_media 直接 FAIL，路径被截断）。
-Set-Location G:\local\pluginplayer\dist
+Set-Location <??>\dist
 & .\pluginplayer.exe --selftest --frames 60 --rpc-port 0 --out <OUT> "<上述中文路径 mp4>"
 ```
 

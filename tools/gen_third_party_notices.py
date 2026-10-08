@@ -26,8 +26,8 @@ MinGW 运行时）。**分发别人的二进制就要承担对应的许可义务
 并且每条都带 `evidence`（我是怎么知道的），便于复核。
 
 用法:
-    F:\\Python314\\python.exe tools\\gen_third_party_notices.py            # 写入
-    F:\\Python314\\python.exe tools\\gen_third_party_notices.py --check    # 只校验是否最新
+    python tools/gen_third_party_notices.py            # 写入
+    python tools/gen_third_party_notices.py --check    # 只校验是否最新
     ... --print                                                           # 打到 stdout
 
 退出码: 0 成功/一致；1 --check 发现过期；6 读不到必需的事实来源。
@@ -110,7 +110,7 @@ LICENSES = {
         "upstream": "https://www.zcool.com.cn/",
         "build": "assets/fonts/ZCOOLKuaiLe-Regular.ttf（1,639,036 字节，TrueType 'glyf' 轮廓）",
         "evidence": [
-            "来源：本机字体资产库 G:\\assets\\fonts\\etc\\ZhanKuKuaiLeTi2016XiuDingBan.zip"
+            "来源：本机字体资产库（落点登记在 allin 仓 docs/事实源/本机事实.md）etc/ZhanKuKuaiLeTi2016XiuDingBan.zip"
             "（用户确认该目录字体均为免费可商用）",
             "**如实说明（证据强度不足，不要当成已核实）**：zip 内**没有**随附 LICENSE 文本，"
             "字体 name 表也没有 nameID 13/14（许可信息字段）—— 目前只能依据发布方公开声明"
@@ -348,8 +348,8 @@ def build_document():
     L = []
     A = L.append
     A("<!-- 由 tools/gen_third_party_notices.py 生成，请勿手工编辑。")
-    A("     重新生成: F:\\Python314\\python.exe tools\\gen_third_party_notices.py")
-    A("     校验最新: F:\\Python314\\python.exe tools\\gen_third_party_notices.py --check")
+    A("     重新生成: python tools/gen_third_party_notices.py")
+    A("     校验最新: python tools/gen_third_party_notices.py --check")
     A("     tools/verify.py 的 third-party-notices 门禁会在提交前跑 --check。 -->")
     A("")
     A("# 第三方组件声明 / Third-Party Notices")
@@ -492,8 +492,8 @@ def build_document():
     A("type host-js\\node_modules\\cordis\\package.json")
     A("")
     A(":: 5) 重新生成本文件并校验是否最新")
-    A("F:\\Python314\\python.exe tools\\gen_third_party_notices.py")
-    A("F:\\Python314\\python.exe tools\\gen_third_party_notices.py --check")
+    A("python tools/gen_third_party_notices.py")
+    A("python tools/gen_third_party_notices.py --check")
     A("```")
     A("")
     A("---")
@@ -523,7 +523,7 @@ def main():
             return 1
         if cur != doc:
             print("[FAIL] THIRD_PARTY_NOTICES.md 已过期（依赖或许可证据变了）")
-            print("       重新生成: F:\\Python314\\python.exe tools\\gen_third_party_notices.py")
+            print("       重新生成: python tools/gen_third_party_notices.py")
             return 1
         print("[PASS] THIRD_PARTY_NOTICES.md 与当前依赖一致")
         return 0

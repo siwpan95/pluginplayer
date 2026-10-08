@@ -106,6 +106,12 @@ SERVER_MAX_LINE_BYTES = 4 * 1024 * 1024
 CMD_NAME = "pluginplayer"
 SHIM_MARKER = "PP_CLI_SHIM"
 
+# 仓库根垫片的"安装时解释器"必须是**相对**形式，不能用 sys.executable：后者会把绝对
+# 解释器路径写进一个**被跟踪**的文件 —— 既注入符盘（调试铁律 5），又毁掉 docs/CLI.md
+# 承诺的"仓库整体搬走也不失效"。verify.py 的 cli-shim-fresh 门禁用这个常量重算并逐字节比对。
+# 用字面反斜杠而不是 os.sep：Linux CI 上 os.sep 是 "/"，会让门禁在那边假红。
+REPO_SHIM_PYTHON = "%~dp0.venv\\Scripts\\python.exe"
+
 # 退出码
 E_OK, E_FAIL, E_USAGE, E_CONN, E_AUTH, E_REMOTE, E_ENV, E_INTR = 0, 1, 2, 3, 4, 5, 6, 130
 
@@ -1132,8 +1138,9 @@ def cmd_install_cli(opts, argv):
 
     written = write_shims(target, with_sep(ROOT), sys.executable)
     # 仓库根再放一份 %~dp0 版：clone 下来就能 `cd /d <repo> && pluginplayer status`，
-    # 不依赖 PATH 有没有装过。它用相对路径，整个仓库搬走也不会失效。
-    repo_shims = write_shims(ROOT, "%~dp0", sys.executable)
+    # 不依赖 PATH 有没有装过。它用相对路径，整个仓库搬走也不会失效 —— 所以这里的
+    # "安装时解释器"也必须相对（REPO_SHIM_PYTHON），不能是 sys.executable。
+    repo_shims = write_shims(ROOT, "%~dp0", REPO_SHIM_PYTHON)
 
     if not on_path and add_to_path:
         add_user_path(target)

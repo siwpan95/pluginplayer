@@ -176,6 +176,31 @@ def g_bat_ascii_crlf(verbose):
         len(files), ", ".join(sorted(os.path.basename(f) for f in files)))
 
 
+@gate("cli-shim-fresh", "仓库根的 pluginplayer.cmd / pp.cmd 与 tools/pp_cli.py 的生成器输出逐字节一致")
+def g_cli_shim_fresh(verbose):
+    """仓库根那两份垫片**是入库的**（README「已知限制」：clone 下来不带 PATH 也能用），
+    而它们由 `tools/pp_cli.py:shim_text()` 生成 —— 于是它们既可能被手工改坏，也可能在
+    生成器改了之后**悄悄过期**。最阴的一种过期：生成器用 `sys.executable` 当"安装时
+    解释器"，重跑 install-cli 就会把绝对符盘路径写进一个被跟踪的文件（铁律 5），
+    顺带毁掉「仓库整体搬走也不失效」。所以这里用生成器**重算**一遍逐字节比对。"""
+    pp = load_cli()
+    want = pp.shim_text("%~dp0", pp.REPO_SHIM_PYTHON)
+    bad = []
+    for name in (pp.CMD_NAME + ".cmd", "pp.cmd"):
+        p = os.path.join(ROOT, name)
+        if not os.path.isfile(p):
+            bad.append("%s 不在盘上（仓库根垫片必须入库）" % name)
+            continue
+        cur = open(p, "rb").read().decode("ascii", "replace")
+        if cur != want:
+            bad.append("%s 与生成器输出不一致（在盘 %d 字节 / 生成 %d 字节）"
+                       % (name, len(cur), len(want)))
+    if bad:
+        raise Fail("%s —— 跑 `python tools/pp_cli.py install-cli` 重新生成后再提交，"
+                   "不要手工改垫片" % "；".join(bad))
+    return "仓库根 pluginplayer.cmd / pp.cmd 与 pp_cli.shim_text() 逐字节一致（各 %d 字节）" % len(want)
+
+
 @gate("plugin-manifest", "dist/plugins/manifest.sha256 与在盘 DLL 逐一相符，且无未登记项")
 def g_plugin_manifest(verbose):
     mf = os.path.join(PLUGIN_DIR, "manifest.sha256")
@@ -1044,8 +1069,10 @@ def selfcheck_cases():
          _addfile("bad_launcher.bat", b"@echo off\r\nrem \xd6\xd0\xce\xc4\r\n")),
         ("bat-ascii-crlf", "把 .bat 的行尾折成裸 LF",
          _subst_bytes("run.bat", b"\r\n", b"\n", count=99)),
+        ("cli-shim-fresh", "改坏仓库根垫片的一个字节（生成物漂移必须被拦）",
+         _corrupt("pluginplayer.cmd")),
         ("plugin-command-count", "把 tests/cli_check.py 的命令数断言改错",
-         _subst("tests/cli_check.py", "== 20", "== 14")),
+         _subst("tests/cli_check.py", "== 35", "== 14")),
         ("native-plugin-set", "把 build.py 的插件表里删掉一个",
          _subst("build.py", '"osd_stats", ', "")),
         ("js-plugin-count", "把 README 的 JS 插件数改错",
@@ -1054,7 +1081,7 @@ def selfcheck_cases():
          _subst("tools/pp_cli.py", "MIN_WIN, MAX_WIN = 160, 8192",
                 "MIN_WIN, MAX_WIN = 161, 8192")),
         ("rpc-methods-align", "从 ARCHITECTURE.md 的方法一览里删掉 app.quit",
-         _subst("docs/ARCHITECTURE.md", "、`app.quit`。", "。")),
+         _subst("docs/ARCHITECTURE.md", "、`app.quit`、", "、")),
         ("exit-codes-align", "从 CLI.md 的退出码表里删掉 130 那一行",
          _drop_line("docs/CLI.md", "| 130 | 被 Ctrl-C 中断")),
         # 必须插在「## 2. 命令总览」的表里 —— 追加到文件末尾门禁看不到，

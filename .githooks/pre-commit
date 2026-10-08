@@ -17,8 +17,8 @@ ROOT=$(git rev-parse --show-toplevel) || exit 0
 
 if [ -n "${PP_PYTHON:-}" ]; then
   PY=$PP_PYTHON
-elif [ -x "F:/Python314/python.exe" ]; then
-  PY="F:/Python314/python.exe"
+elif [ -x "$ROOT/.venv/Scripts/python.exe" ]; then
+  PY="$ROOT/.venv/Scripts/python.exe"
 elif command -v python >/dev/null 2>&1; then
   PY=python
 elif command -v py >/dev/null 2>&1; then

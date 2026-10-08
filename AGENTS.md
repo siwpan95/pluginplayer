@@ -20,7 +20,7 @@ examples/hello_plugin/    最小原生插件示例（PLUGIN_GUIDE 逐行讲解�
 tests/                    冒烟（smoke_link / smoke_audio）、插件 API 回归、CLI 回归（cli_check.py）、
                           unit/（C++ 单元测试 + 零依赖 harness）、python/（标准库 unittest）
 tools/                    fetch_deps（依赖）、rpc_client（协议测试客户端）、
-                          pp_cli（命令行接口）、verify（18 条机械门禁）、ci（CI 编排）、
+                          pp_cli（命令行接口）、verify（19 条机械门禁）、ci（CI 编排）、
                           gitee_release（建仓/转公开/发发行版）、
                           gen_third_party_notices（第三方声明生成器）、
                           dsh_bind_workspace（把目录注册成 dsh 工作区）、
@@ -37,19 +37,19 @@ player/ _extract/ _deps/  参考源码与依赖归档缓存（不入库）
 ## 命令
 
 ```bat
-F:\Python314\python.exe tools\fetch_deps.py        :: 准备 vendor/（首次必须）
-F:\Python314\python.exe build.py                   :: 编译内核 + 插件 + 打包 dist/
-F:\Python314\python.exe build.py --unit            :: C++ 单元测试（不需要 vendor/）
-F:\Python314\python.exe build.py --smoke           :: 工具链冒烟
-F:\Python314\python.exe build.py --apitest         :: 编译插件 API 回归插件
-F:\Python314\python.exe build.py --release         :: 出发布物（干净重建 + 清理 + 清单）
-F:\Python314\python.exe tools\verify.py            :: 18 条机械门禁（<1 秒，不需构建产物）
-F:\Python314\python.exe tools\verify.py --selfcheck :: 对每条门禁故意破坏，断言它必须报红
-F:\Python314\python.exe tools\ci.py                :: CI 编排（分阶段，前提缺失记 SKIP）
-F:\Python314\python.exe tests\cli_check.py         :: CLI 回归（端到端）
-F:\Python314\python.exe -m unittest discover -s tests\python   :: Python 单元测试
+python tools\fetch_deps.py        :: 准备 vendor/（首次必须）
+python build.py                   :: 编译内核 + 插件 + 打包 dist/
+python build.py --unit            :: C++ 单元测试（不需要 vendor/）
+python build.py --smoke           :: 工具链冒烟
+python build.py --apitest         :: 编译插件 API 回归插件
+python build.py --release         :: 出发布物（干净重建 + 清理 + 清单）
+python tools\verify.py            :: 19 条机械门禁（<1 秒，不需构建产物）
+python tools\verify.py --selfcheck :: 对每条门禁故意破坏，断言它必须报红
+python tools\ci.py                :: CI 编排（分阶段，前提缺失记 SKIP）
+python tests\cli_check.py         :: CLI 回归（端到端）
+python -m unittest discover -s tests\python   :: Python 单元测试
 ci.bat                                             :: 一键：门禁 → 单测 → 冒烟 → 自检 → CLI
-F:\Python314\python.exe tools\pp_cli.py install-cli  :: 装好后可用 `pluginplayer <子命令>`
+python tools\pp_cli.py install-cli  :: 装好后可用 `pluginplayer <子命令>`
 ```
 
 装过 CLI 之后：`pluginplayer doctor` / `selftest` / `build --release` / `status` / `cmd <名>` /

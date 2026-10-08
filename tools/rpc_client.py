@@ -12,9 +12,9 @@ rpc_client.py — PluginPlayer 控制通道测试客户端（同时是「进程�
     4) 默认文件 <本脚本目录>/../dist/config/rpc-token.txt
 
 用法:
-    F:/Python314/python.exe tools/rpc_client.py [port]
-    F:/Python314/python.exe tools/rpc_client.py --token <hex>
-    F:/Python314/python.exe tools/rpc_client.py 7911 --token-file dist/config/rpc-token.txt
+    python tools/rpc_client.py [port]
+    python tools/rpc_client.py --token <hex>
+    python tools/rpc_client.py 7911 --token-file dist/config/rpc-token.txt
 """
 import argparse
 import json

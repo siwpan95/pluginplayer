@@ -1,6 +1,6 @@
 <!-- 由 tools/gen_third_party_notices.py 生成，请勿手工编辑。
-     重新生成: F:\Python314\python.exe tools\gen_third_party_notices.py
-     校验最新: F:\Python314\python.exe tools\gen_third_party_notices.py --check
+     重新生成: python tools/gen_third_party_notices.py
+     校验最新: python tools/gen_third_party_notices.py --check
      tools/verify.py 的 third-party-notices 门禁会在提交前跑 --check。 -->
 
 # 第三方组件声明 / Third-Party Notices
@@ -161,8 +161,8 @@ type vendor\ffmpeg\include\libavutil\ffversion.h
 type host-js\node_modules\cordis\package.json
 
 :: 5) 重新生成本文件并校验是否最新
-F:\Python314\python.exe tools\gen_third_party_notices.py
-F:\Python314\python.exe tools\gen_third_party_notices.py --check
+python tools/gen_third_party_notices.py
+python tools/gen_third_party_notices.py --check
 ```
 
 ---

@@ -156,7 +156,7 @@ python tools\ci.py           :: 同上，直接调编排脚本；可 --list / --
 
 | 阶段 | 环境 | 前提 |
 |---|---|---|
-| `gates` 机械门禁（`tools/verify.py`，18 条） | 跨平台 | 无 |
+| `gates` 机械门禁（`tools/verify.py`，19 条） | 跨平台 | 无 |
 | `py-unit` Python 单元测试（108 项） | 跨平台 | 标准库 |
 | `cpp-unit` C++ 单元测试（89 项） | 跨平台 | g++ / MinGW |
 | `smoke` 冒烟、`build` 构建、`selftest` 自检、`color` 色彩还原、`cli` CLI 回归、`release` 发布构建 | **仅 Windows** | vendor/ 或 dist/ |
@@ -184,7 +184,7 @@ SDL3/FFmpeg 的 Windows 二进制 + Winsock2。所以：
 散文约束不了它们，所以每条「两处必须相等」的断言都被写成了可执行检查：
 
 ```bat
-python tools\verify.py              :: 18 条门禁，<1 秒，不需要构建产物
+python tools\verify.py              :: 19 条门禁，<1 秒，不需要构建产物
 python tools\verify.py --list       :: 看有哪些
 python tools\verify.py --selfcheck  :: 对每条门禁做一次故意破坏，断言它必须报红
 ```
@@ -372,7 +372,7 @@ pluginplayer/
 │     python/                          ★ Python 单元测试（108 项，标准库 unittest）
 ├─ tools/fetch_deps.py                 依赖准备；rpc_client.py 控制通道测试客户端（带令牌）
 │     pp_cli.py                        ★ 命令行接口本体（生成 pluginplayer 命令）
-│     verify.py                        ★ 机械门禁（18 条，<1 秒，--selfcheck 证明它们拦得住）
+│     verify.py                        ★ 机械门禁（19 条，<1 秒，--selfcheck 证明它们拦得住）
 │     ci.py                            ★ CI 编排（分阶段，前提缺失记 SKIP 并说明原因）
 │     gitee_release.py                   Gitee 建仓 / 转公开 / 发发行版（幂等，可分步重跑）
 │     gen_third_party_notices.py        第三方组件声明生成器（依赖/许可证据有变就得重跑）
@@ -657,19 +657,19 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 
 `quit` 之后复查端口：`port 7911 已释放，播放器已退出`。
 
-### 11. 机械门禁 `tools/verify.py` —— 18/18 通过
+### 11. 机械门禁 `tools/verify.py` —— 19/19 通过
 
 ```
-==== 机械门禁: 18/18 通过，跳过 0 项，失败 0 项 ====
-
-[PASS] bat-ascii-crlf       6 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR（含 start-dsh.bat）
+[PASS] bat-ascii-crlf       6 个文件：0 非 ASCII 字节、0 裸 LF、0 孤立 CR（ci.bat, pluginplayer.cmd, pp.cmd, run.bat, selftest.bat, start-dsh.bat）
+[PASS] cli-shim-fresh       仓库根 pluginplayer.cmd / pp.cmd 与 pp_cli.shim_text() 逐字节一致（各 883 字节）
 [PASS] plugin-manifest      11 个 DLL 哈希与清单逐一相符
 [PASS] plugin-command-count 注册 35 个命令，README/tests/cli_check.py/docs/CLI.md 三处声明一致
 [PASS] native-plugin-set    11 个：audio_device, audio_viz, hotkey_ext, osd_stats, radio_bridge, snapshot, subtitles, track_selector, video_effects, video_quality, video_tonemap；dist/plugins 一致
 [PASS] js-plugin-count      3 个（01-event-log.mjs, 02-auto-resume.mjs, 03-web-remote.mjs），README 声明与实际一致
-[PASS] release-payload      57 个文件 / 145.8 MB，与 README 的 57 / 146 MB 一致
+[PASS] release-payload      57 个文件 / 145.9 MB，与 README 的 57 / 146 MB 一致
 [PASS] portable-modules     21 个文件的 Windows API 全部限定在条件编译分支内（Linux CI 的前提）
-[PASS] no-credentials       103 个文本文件已扫描，未发现硬编码凭据
+[PASS] no-credentials       106 个文本文件已扫描，未发现硬编码凭据
+[PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/pluginplayer-ci.yml, ci.bat）
 [PASS] arg-bounds-align     13 项边界与 C++ 源码一致（窗口最小边、窗口最大边、自检帧数上限、音量下界 …）
 [PASS] rpc-methods-align    实现 23 个方法，与 ARCHITECTURE.md 及 CLI 引用一致
 [PASS] exit-codes-align     8 个退出码（0、1、2、3、4、5、6、130）与 CLI 常量一一对应，且都有含义说明
@@ -679,24 +679,26 @@ pp.cmd status                 rc=0   完整状态表（音量 0.800）
 [PASS] doc-links            34 条相对链接全部可解析
 [PASS] docs-index           4 份文档全部收录
 [PASS] readme-tree          目录结构里 57 个条目全部存在（按 basename 核对）
-[PASS] ci-entrypoints       13 个引用全部存在（.githooks/pre-commit, .workflow/pluginplayer-ci.yml, ci.bat）
+
+==== 机械门禁: 19/19 通过，跳过 0 项，失败 0 项 ====
 ```
 
 **门禁自己也要被验证。** `--selfcheck` 对每条门禁做一次故意破坏，断言它必须报红：
-把 `.bat` 塞进非 ASCII 字节 / 折成裸 LF、改错 `cli_check.py` 的命令数断言、从 `build.py`
-的插件表里删一个、改错 README 的 JS 插件数、把 CLI 的窗口最小边改成 161、从
-`ARCHITECTURE.md` 的方法一览里删掉 `app.quit`、从退出码表里删掉 130 那行、往命令表里塞
-一个不存在的命令、改错依赖表里的 FFmpeg 版本、手改生成物、加一条死链、加一份没被索引的
-文档、往目录树里塞不存在的文件、把已登记插件改 1 字节、从 `dist/` 里删一个文件、
-在可移植模块里塞一句 Wind32 API 调用、把流水线引用的工具改个名 ——
+把 `.bat` 塞进非 ASCII 字节 / 折成裸 LF、**改坏仓库根的垫片 1 字节**、改错 `cli_check.py`
+的命令数断言、从 `build.py` 的插件表里删一个、改错 README 的 JS 插件数、把 CLI 的窗口
+最小边改成 161、从 `ARCHITECTURE.md` 的方法一览里删掉 `app.quit`、从退出码表里删掉 130
+那行、往命令表里塞一个不存在的命令、改错依赖表里的 FFmpeg 版本、手改生成物、加一条死链、
+加一份没被索引的文档、往目录树里塞不存在的文件、把已登记插件改 1 字节、从 `dist/` 里删
+一个文件、在可移植模块里塞一句 Wind32 API 调用、把流水线引用的工具改个名 ——
 
 ```
 [PASS] bat-ascii-crlf         拦住了：把 .bat 的行尾折成裸 LF
+[PASS] cli-shim-fresh         拦住了：改坏仓库根垫片的一个字节（生成物漂移必须被拦）
 [PASS] arg-bounds-align       拦住了：把 CLI 的窗口最小边改成 161（与 app.h 不符）
 [PASS] plugin-manifest        拦住了：把已登记插件改 1 个字节（必须靠重算哈希发现）
 [PASS] portable-modules       拦住了：在可移植模块的空行处塞一句 Windows API 调用
-...                                                            （共 19 项）
-==== 门禁自检: 19/19 通过，跳过 0 项，失败 0 项 ====
+...                                                            （共 20 项）
+==== 门禁自检: 20/20 通过，跳过 0 项，失败 0 项 ====
 ```
 
 这条自检**已经产出了真实收益**，抓出的问题都不是顺手看到的：
@@ -1225,7 +1227,7 @@ nameID 13/14 许可字段 —— 目前依据是字体发布方（站酷）的�
 | 硬件解码 | 无 | **有**（D3D11VA，自动回退软解；实测减少丢帧，见验证结果 §16） |
 | 纹理上传 | 每帧 RGBA（CPU 逐像素转换 + 4K 33 MB/帧） | **NV12 纹理 + GPU 做 YUV→RGB**（4K 12.4 MB/帧；CPU/帧 −53%~−73%，4K 显示帧数 ~2 倍且零丢帧） |
 | 音频时钟 | 音频/视频/外部三种主时钟 | 音频优先 + **停滞自动退回墙钟** |
-| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG（含**像素级**断言"画面真的画上去了"）；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（197 项）、`tools/verify.py` 18 条机械门禁（含自检）、`ci.bat` 一键编排 |
+| 验证方式 | 手工点界面 | `--selftest` 无人值守产出 JSON 报告 + 帧 PNG（含**像素级**断言"画面真的画上去了"）；另有 `--smoke` 冒烟、`--apitest` 插件 API 回归、`tests/cli_check.py` CLI 回归、`tests/unit` + `tests/python` 单元测试（197 项）、`tools/verify.py` 19 条机械门禁（含自检）、`ci.bat` 一键编排 |
 | 外部控制的安全 | 无外部控制 | JSON-RPC 强制令牌认证 + 报文/并发上限；网络输入默认拒绝 |
 
 ---

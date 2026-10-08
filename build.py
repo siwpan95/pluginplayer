@@ -7,7 +7,7 @@ build.py — PluginPlayer 构建脚本
 不依赖 cmake / make：直接用本机 MinGW-w64 g++ 编译，产物汇总到 dist/。
 
 用法:
-    F:/Python314/python.exe build.py            # 完整构建（内核 + 全部插件 + 打包 dist）
+    python build.py            # 完整构建（内核 + 全部插件 + 打包 dist）
     ... build.py --core                         # 只编译内核
     ... build.py --plugins osd_stats,snapshot   # 只编译指定插件
     ... build.py --clean                        # 清理 build/ 与 dist/
@@ -521,9 +521,9 @@ def make_launcher():
                 "  echo [ERR] vendor\\ffmpeg\\bin\\ffmpeg.exe is missing. Run tools\\fetch_deps.py first.\r\n"
                 "  pause & exit /b 1\r\n"
                 ")\r\n"
-                "F:\\Python314\\python.exe build.py || pause\r\n"
+                "python build.py || pause\r\n"
                 "echo [1/3] smoke tests (tests/smoke_link.cpp + tests/smoke_audio.cpp)\r\n"
-                "F:\\Python314\\python.exe build.py --smoke\r\n"
+                "python build.py --smoke\r\n"
                 "if errorlevel 1 echo [WARN] smoke test had failures, see output above\r\n"
                 "cd dist\r\n"
                 "if not exist test_assets mkdir test_assets\r\n"
@@ -539,8 +539,8 @@ def make_launcher():
     # start-dsh.bat：**本项目的启动器**（双击打开播放器窗口；媒体文件拖到它上面即播）。
     # 它转发给 run.bat —— 启动逻辑（解释器/引号/产物检查/退出码三条硬约束，见
     # docs/DEVELOPMENT.md §7）只保留一份，不复制第二遍。历史上这里放的是
-    # deepseek-harness 的 Web UI 启动器（上游那份在 G:\notpython\deepseek-harness-master\
-    # start-dsh.bat），按项目所有者要求改回"启动本项目"这一职责；两个 dsh 小工具
+    # deepseek-harness 的 Web UI 启动器（上游那份在 deepseek-harness 仓的 start-dsh.bat；
+    # 本机 checkout 现落于 D:\deepseek-harness），按项目所有者要求改回"启动本项目"这一职责；两个 dsh 小工具
     # （tools/dsh_bind_workspace.py、tools/dsh_open_ui.py）留在 tools/ 里可独立使用。
     dsh = os.path.join(ROOT, "start-dsh.bat")
     with open(dsh, "w", encoding="utf-8", newline="") as f:
