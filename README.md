@@ -1,5 +1,12 @@
 # PluginPlayer — 插件版播放器
 
+## 仓库角色定位（投资组合分级 ②）
+
+> 本仓在 siwpan 投资组合（D:/projects/repos，共 133 仓）中定级为 **② 保留**，领域 **播放器**。
+> **角色**：播放器内核。
+> **维护策略**：② 旗舰 / 枢纽仓库打磨保留，作为能力展示或收敛点；② 保留类仓库低优先维持、不主动扩张。
+> 投资组合统一分级索引：`D:/projects/repos/PORTFOLIO_TIERING.md`。
+
 > 仓库：<https://gitee.com/siwpan/pluginplayer> ·
 > 许可：[GPL-3.0-or-later](LICENSE)（原因见「开源与合规」）·
 > 发行版：<https://gitee.com/siwpan/pluginplayer/releases>
