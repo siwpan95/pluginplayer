@@ -15,7 +15,7 @@ iconv / libpng / unibreak / zlib …）。本脚本做**依赖闭包固定点抓
      默认也由本脚本从上游抓**（gcc-libs 提供前两个、libwinpthread 提供第三个），
      这样 vendor/libass/bin 在**尚未构建**（还没有 dist/）时也是完整可加载集（build.py 亦如此声明）。
      `--skip-runtime` 可退回旧行为（三件套留给 `tools/fetch_deps.py --libass-only` 从本机
-     来源 PP_LIBASS_RUNTIME_SRC → PP_GXX 目录 → F:/mingw64/mingw64/bin → 本仓 dist/ 补齐，
+     来源 PP_LIBASS_RUNTIME_SRC → PP_GXX 目录 → PATH → 本仓 dist/ 补齐，
      离线可用、幂等）。
 
 全程纯 Python（zstandard + tarfile），不依赖 7z / tar / pacman。供应链防护同 fetch_deps：

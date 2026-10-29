@@ -331,10 +331,10 @@ def _mingw_bin_candidates(root):
         v = os.environ.get(var, "").strip()
         if v:
             cands.append(v)
-    gxx = os.environ.get("PP_GXX", r"F:/mingw64/mingw64/bin/g++.exe").strip()
+    # 去符盘（铁律 5）：PP_GXX → PATH 查找，不写死盘符
+    gxx = (os.environ.get("PP_GXX") or shutil.which("g++.exe") or "").strip()
     if gxx:
         cands.append(os.path.dirname(gxx))
-    cands.append(r"F:/mingw64/mingw64/bin")           # build.py 的默认 MinGW 工具链
     cands.append(os.path.join(root, "dist"))         # 构建产物：含完整运行时闭包
     seen, out = set(), []
     for c in cands:

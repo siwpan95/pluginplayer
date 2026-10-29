@@ -14,7 +14,8 @@ build.py — PluginPlayer 构建脚本
     ... build.py --list                         # 列出可编译的插件
 
 工具链（可用环境变量覆盖）:
-    PP_GXX   默认 F:/mingw64/mingw64/bin/g++.exe
+    PP_GXX   默认 g++.exe（PATH 查找）；MinGW 不在 PATH 时用 PP_GXX 指定
+              （去符盘：不写死盘符，换机由环境变量或 PATH 决定）
 """
 import os
 import sys
@@ -31,7 +32,9 @@ BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 VENDOR = os.path.join(ROOT, "vendor")
 
-GXX = os.environ.get("PP_GXX", r"F:/mingw64/mingw64/bin/g++.exe")
+# 去符盘（铁律 5）：优先 PP_GXX 环境变量，其次 PATH 查找，兜底交给 PATH 解析。
+# 不写死任何盘符——MinGW 落点随机器而异。
+GXX = os.environ.get("PP_GXX") or shutil.which("g++.exe") or "g++.exe"
 
 CORE_SOURCES = [
     "core/main.cpp", "core/app.cpp", "core/host.cpp", "core/player.cpp",

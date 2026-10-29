@@ -924,7 +924,8 @@ def cmd_doctor(opts, argv):
             checks.append(check_manifest_integrity())
 
     # 工具链与依赖
-    gxx = os.environ.get("PP_GXX", r"F:/mingw64/mingw64/bin/g++.exe")
+    # 去符盘（铁律 5）：PP_GXX → PATH 查找 → 兜底交给 PATH 解析，不写死盘符
+    gxx = os.environ.get("PP_GXX") or shutil.which("g++.exe") or "g++.exe"
     if os.path.isfile(gxx):
         rc, txt = run_capture([gxx, "--version"], timeout=30)
         checks.append(Check("编译器 g++", "OK" if rc == 0 else "FAIL",

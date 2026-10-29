@@ -392,12 +392,12 @@ pluginplayer.cmd --version    rc=0   pluginplayer-cli 1.0.0
 pluginplayer.cmd status       rc=0   媒体   : test_assets/sample.mp4
 pluginplayer.cmd seek +1      rc=0   [OK] 位置 -> 0:07.90
 pluginplayer.cmd commands     rc=0   effect.clear  ...  <plugin#5>
-pluginplayer.cmd doctor       rc=0   [OK]   Python   3.14.7 @ F:\Python314\python.exe
+pluginplayer.cmd doctor       rc=0   [OK]   Python   3.14.7 @ /Python314/python.exe
 <仓库根>pluginplayer.cmd --version  rc=0   pluginplayer-cli 1.0.0
 pp.cmd status                 rc=0   （完整状态表，音量 0.800）
 ```
 
-> 注：上面是 **2026-09 那次实跑的原始输出**，其中 `F:\Python314\python.exe` 是**当时**的解释器落点；
+> 注：上面是 **2026-09 那次实跑的原始输出**，其中 `/Python314/python.exe`（去符盘形式）是**当时**的解释器落点；
 > 本机现在在 `G:\Python314\python.exe`（同一个 3.14.7）。按「历史转录不改数」的口径保留原值。
 
 `quit` 之后复查端口：`port 7911 已释放，播放器已退出`。
