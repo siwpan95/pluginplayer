@@ -1,0 +1,9 @@
+
+# allin-repocheck-r6-fix (2026-11-15)
+subunit
+testtools
+pyzmq
+zstandard
+
+# allin-r6-local (2026-11-15) 运行时注入的内部模块声明
+# r6-local: gdb
