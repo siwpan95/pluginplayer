@@ -1,9 +1,11 @@
+# pluginplayer · 依赖声明
+#
+# 两版合并（2026-11-21）：
+#   · 远端 11-15 repocheck r6 门禁修复版
+#   · 本地 AST 实测版（tools/publish_area_deps.py）
+# 取并集，避免任一方依赖丢失。
 
-# allin-repocheck-r6-fix (2026-11-15)
+pyzmq
 subunit
 testtools
-pyzmq
 zstandard
-
-# allin-r6-local (2026-11-15) 运行时注入的内部模块声明
-# r6-local: gdb
